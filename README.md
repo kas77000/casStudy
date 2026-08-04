@@ -146,8 +146,18 @@ Each parent order lands in exactly one bucket:
 | `SENT_NOT_FILLED` | a child order reached the auction but never traded |
 | `NOT_SENT` | no child order was ever sent to the auction |
 
-A child order counts as "of the close" when its `venue` or `venuetype` contains
-`CLOSE`; where the venue is unknown, the auction print window decides.
+A child order counts as "of the close" when its **`venue`** contains `CLOSE` —
+`venuetype` is not consulted, since it can read `CLOSE` on a child order that was
+only close-*eligible*. The parents that traded in the auction are then exactly
+those reached by tracing those child orders' `id_work` back to `id_target` on the
+execution tape.
+
+**The clock has no say.** A fill printing inside 17:45–18:05 on a continuous
+venue is continuous; a close-venue fill stays close however late it reports. A
+fill whose `id_work` matches no child order therefore cannot be credited to the
+close at all — `reconciliation` counts those under *"every fill traces back to a
+child order"*, and a non-zero count there means close quantity is being
+understated.
 
 ### 5.2 Why an order missed the close
 

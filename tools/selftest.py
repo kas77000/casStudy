@@ -204,7 +204,11 @@ def build_workorders() -> pd.DataFrame:
         residual_at_cas = size - cont
 
         if cont > 0:        # what we did during continuous trading
-            wo(id_target=tid, sym=sym, side=side, size=cont)
+            # 103's continuous child carries a venuetype that reads CLOSE while
+            # its venue does not: only the venue may decide, so this fill has to
+            # stay continuous and 103 has to stay NO_CLOSE_INSTRUCTION.
+            wo(id_target=tid, sym=sym, side=side, size=cont,
+               venuetype="LIT_CLOSE_ELIGIBLE" if tid == 103 else "LIT")
 
         if tid == 102:      # rejected in the auction on a band breach
             wo(id_target=tid, sym=sym, side=side, size=residual_at_cas,
@@ -250,9 +254,14 @@ def build_executions(wo: pd.DataFrame) -> pd.DataFrame:
     for _, w in filled.iterrows():
         is_close = "CLOSE" in str(w["venue"]).upper()
         px = CLOSE_FILL_PX if is_close else REF_PX * 0.999
+        # 109's continuous fill reports at 18:01, inside the auction window, on a
+        # continuous venue.  Only the venue may decide, so it has to stay
+        # continuous and 109 has to stay ALGO_NEVER_COMMITTED_TO_CLOSE.
+        late_continuous = not is_close and int(w["id_target"]) == 109
         rows.append({
             "date": DATE,
-            "time": t("18:00:45") if is_close else w["time"],
+            "time": t("18:00:45") if is_close else (
+                t("18:01:00") if late_continuous else w["time"]),
             "id_target": w["id_target"], "id_candidate": 0, "id_work": w["id_work"],
             "trader": "JDOE", "oes_oid": w["oes_oid"], "oes_primoid": w["oes_primoid"],
             "wave": "W1", "sym": w["sym"], "side": w["side"],

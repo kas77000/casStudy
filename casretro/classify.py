@@ -157,10 +157,11 @@ def enrich_workorders(wo: pd.DataFrame) -> pd.DataFrame:
     df = wo.copy()
     df["venue"] = df.get("venue", "").astype(str)
     df["venuetype"] = df.get("venuetype", "").astype(str)
-    df["is_close"] = (
-        df["venue"].str.upper().str.contains("CLOSE", na=False)
-        | df["venuetype"].str.upper().str.contains("CLOSE", na=False)
-    )
+    # `venue` alone decides.  venuetype is descriptive -- it can read CLOSE on a
+    # child order that was merely close-eligible -- so it is carried through as a
+    # column but never consulted here.  Every parent that traded in the auction
+    # is then reached by tracing these child orders' id_work back to id_target.
+    df["is_close"] = df["venue"].str.upper().str.contains("CLOSE", na=False)
 
     df["state"] = df.get("state", "").astype(str)
     df["state_kind"] = df["state"].map(workorder_state_kind)
@@ -218,10 +219,12 @@ def enrich_executions(ex: pd.DataFrame, wo: pd.DataFrame) -> pd.DataFrame:
     else:
         mapped = pd.Series(np.nan, index=df.index)
 
-    # venue wins when we know it; otherwise the auction print window decides.
-    df["is_close"] = mapped.where(
-        mapped.notna(), df["bucket"].isin(C.CAS_BUCKETS)
-    ).astype(bool)
+    # The venue is the only test.  The clock has no say: a fill that prints
+    # inside the auction window on a continuous venue is continuous, and a close
+    # venue stays close however late it reports.  An execution we cannot trace
+    # back to a child order is not counted as close -- `_build_reconciliation`
+    # reports how many of those there were, because they would be silent misses.
+    df["is_close"] = mapped.fillna(False).astype(bool)
     df["phase"] = np.where(df["is_close"], "CLOSE", df["time_phase"])
 
     fillsize = pd.to_numeric(df.get("fillsize"), errors="coerce").fillna(0)

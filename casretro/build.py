@@ -272,7 +272,7 @@ def assemble(
 
     sym_stats = _build_sym_stats(orders, raw.sym_market, ex)
     bench = _build_benchmark(sym_stats)
-    recon = _build_reconciliation(orders, ex, states)
+    recon = _build_reconciliation(orders, ex, states, wo)
     summary = _build_summary(orders, rej, cxl)
     timing = _build_timing(orders)
 
@@ -500,7 +500,8 @@ def _build_timing(orders: pd.DataFrame) -> pd.DataFrame:
 
 
 def _build_reconciliation(
-    orders: pd.DataFrame, ex: pd.DataFrame, states: pd.DataFrame
+    orders: pd.DataFrame, ex: pd.DataFrame, states: pd.DataFrame,
+    wo: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Cross-checks whose failure means a number in the report is suspect."""
     rows = []
@@ -527,9 +528,18 @@ def _build_reconciliation(
         f"{over} parent orders over-filled")
 
     if ex is not None and not ex.empty and "id_work" in ex.columns:
-        orphan = int(ex["id_work"].isna().sum())
-        add("every execution carries an id_work", orphan == 0,
-            f"{orphan} executions without a child order")
+        # Close participation is decided purely by the child order's venue, so an
+        # execution that cannot be traced to one is a fill we cannot attribute --
+        # it silently counts as continuous.
+        fills = ex[ex["is_fill"]] if "is_fill" in ex.columns else ex
+        orphan = int(fills["id_work"].isna().sum())
+        unmapped = 0
+        if wo is not None and not wo.empty and "id_work" in wo.columns:
+            known = set(wo["id_work"].dropna())
+            unmapped = int((~fills["id_work"].dropna().isin(known)).sum())
+        add("every fill traces back to a child order", orphan + unmapped == 0,
+            f"{orphan} fills without an id_work, {unmapped} whose id_work is not "
+            f"in the workorder table - those cannot be credited to the close")
 
     if states is not None and not states.empty:
         missing = set(orders["id_target"]) - set(states["id_target"])
