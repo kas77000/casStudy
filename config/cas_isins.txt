@@ -1,0 +1,10 @@
+# CAS India universe -- ISIN whitelist used by cas_price_move.py
+#
+# Paste the ISIN list from temp.q below.  Any format works: the loader picks up
+# every 12-char ISIN token, so the raw backtick list can be pasted as-is:
+#
+#   `INE180A01020`INE935A01035`INE451A01017`...
+#
+# One per line, comma separated or space separated is fine too.  Duplicates are
+# removed and every ISIN is check-digit validated (bad ones are reported and
+# dropped).  Lines starting with # or / are ignored.

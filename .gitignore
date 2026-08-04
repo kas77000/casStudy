@@ -1,0 +1,22 @@
+# Internal material: schema dumps, screenshots, the raw prompt.
+no_git/
+
+# Generated reports
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local overrides of the connection details
+config/instances.local.json

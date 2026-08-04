@@ -1,0 +1,78 @@
+{
+  "_comment": [
+    "kdb+ instances used by the CAS retrospective report.",
+    "No username/password is sent -- host and port only.",
+    "",
+    "Each role has an 'ht' (historical, date-partitioned) entry and optionally an",
+    "'rt' (real-time / intraday) entry.  Run with --mode rt to hit the RT tapes at",
+    "the end of the day before the HDB write-down.",
+    "",
+    "'partitioned': true  -> queries emit  `where date=d, ...`",
+    "'partitioned': false -> queries omit the date predicate entirely (RT tables",
+    "                        such as qatt_17031 have no `date` column).",
+    "",
+    "FILL IN host / port BEFORE RUNNING.  The ports below are placeholders except",
+    "for the qatt ones, which are implied by the table names qatt_17034 / qatt_17031."
+  ],
+
+  "sources": {
+    "oms": {
+      "ht": {
+        "label": "OMS-HT",
+        "host": "CHANGE_ME",
+        "port": 0,
+        "partitioned": true,
+        "tables": {
+          "target": "target",
+          "target_state": "target_state",
+          "workorder": "workorder",
+          "execution": "execution",
+          "alerts": "alerts"
+        }
+      },
+      "rt": {
+        "label": "OMS-RT",
+        "host": "CHANGE_ME",
+        "port": 0,
+        "partitioned": false,
+        "tables": {
+          "target": "target",
+          "target_state": "target_state",
+          "workorder": "workorder",
+          "execution": "execution",
+          "alerts": "alerts"
+        }
+      }
+    },
+
+    "qatt": {
+      "ht": {
+        "label": "QATT-HT",
+        "host": "CHANGE_ME",
+        "port": 17034,
+        "partitioned": true,
+        "tables": { "qatt": "qatt_17034" }
+      },
+      "rt": {
+        "label": "QATT-RT",
+        "host": "CHANGE_ME",
+        "port": 17031,
+        "partitioned": false,
+        "tables": { "qatt": "qatt_17031" }
+      }
+    },
+
+    "ref": {
+      "ht": {
+        "label": "REF",
+        "host": "CHANGE_ME",
+        "port": 0,
+        "partitioned": true,
+        "tables": {
+          "equity": "equity",
+          "fx_last": "fx_last"
+        }
+      }
+    }
+  }
+}
