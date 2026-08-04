@@ -185,7 +185,7 @@ def assemble(
     raw: RawFrames,
     warnings: list[str] | None = None,
     *,
-    drop_unfilled_cancelled: bool = C.DROP_UNFILLED_CANCELLED,
+    drop_unfilled: bool = C.DROP_UNFILLED_ORDERS,
 ) -> ReportData:
     warnings = list(warnings or [])
 
@@ -212,12 +212,13 @@ def assemble(
 
         orders = _fill_defaults(orders)
 
-        # pulled orders ------------------------------------------------------ #
-        # Cancelled with nothing executed: dropped here, before anything is
-        # counted, so the waterfall, the per-sym stats and the participation
-        # rate all see the same population.
-        if drop_unfilled_cancelled:
-            drop = CL.unfilled_cancelled_mask(orders)
+        # orders that executed nothing --------------------------------------- #
+        # Dropped here, before anything is counted, so the waterfall, the mix
+        # tables, the per-sym stats and the participation rate all see the same
+        # population: orders that traded, fully or in part.  A rejected order
+        # that still completed a percentage stays -- the test is on quantity.
+        if drop_unfilled:
+            drop = CL.nothing_executed_mask(orders)
             n_drop = int(drop.sum())
             if n_drop:
                 dropped_ids = set(orders.loc[drop, "id_target"])
@@ -229,9 +230,8 @@ def assemble(
                 alerts = _without_ids(alerts, dropped_ids)
                 warnings.append(
                     f"{n_drop} parent order{'s' if n_drop != 1 else ''} "
-                    f"({dropped_qty:,.0f} shares) excluded: "
-                    f"cancelled without a single execution "
-                    f"(--keep-unfilled-cancelled to keep them)"
+                    f"({dropped_qty:,.0f} shares) excluded: nothing executed "
+                    f"at all (--keep-unfilled to keep them)"
                 )
 
         # market context ---------------------------------------------------- #
@@ -306,7 +306,7 @@ def build_report(
     *,
     isins: list[str] | None = None,
     skip_market_data: bool = False,
-    drop_unfilled_cancelled: bool = C.DROP_UNFILLED_CANCELLED,
+    drop_unfilled: bool = C.DROP_UNFILLED_ORDERS,
     verbose: bool = True,
 ) -> ReportData:
     raw, warnings = load_frames(
@@ -314,8 +314,7 @@ def build_report(
         skip_market_data=skip_market_data, verbose=verbose,
     )
     data = assemble(
-        date, pool.mode, flow, raw, warnings,
-        drop_unfilled_cancelled=drop_unfilled_cancelled,
+        date, pool.mode, flow, raw, warnings, drop_unfilled=drop_unfilled,
     )
     if verbose:
         for w in data.warnings[len(warnings):]:

@@ -78,12 +78,18 @@ python -m casretro --no-market-data --formats csv
 everything else is Agency. With `both`, `flow` is a column and every aggregate is
 broken down side by side plus a `TOTAL` row.
 
-Parent orders that were **cancelled without executing a single share** are
-dropped before anything is counted — they are pulled orders, not close misses,
-and leaving them in only inflates `NOT_SENT` and depresses the participation
-rate. The count and the quantity removed are printed and land in the run
-parameters of every output. `--keep-unfilled-cancelled` puts them back
-(`config.DROP_UNFILLED_CANCELLED` is the default).
+The report covers **orders that executed — partially or completely**. A parent
+that put nothing away at all is dropped before anything is counted, whatever the
+reason it went nowhere: it describes intent rather than execution, and it only
+inflates `NOT_SENT` and depresses the participation rate.
+
+The test is on quantity alone, so **a rejected order that still completed a
+percentage stays in** — as does one that was cancelled, arrived late, or was
+priced out, as long as some quantity traded. Only `exec_qty = 0` goes.
+
+The count and the quantity removed are printed and land in the run parameters of
+every output. `--keep-unfilled` puts them back (`config.DROP_UNFILLED_ORDERS` is
+the default).
 
 Output lands in `output/cas_retro_<date>_<flow>/`.
 

@@ -71,9 +71,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="skip the qatt queries - no reference price, band check, volume share or slippage",
     )
     ap.add_argument(
-        "--keep-unfilled-cancelled", action="store_true",
-        help="keep parent orders that were cancelled without executing anything "
-             "(dropped by default - they are pulled orders, not close misses)",
+        "--keep-unfilled", action="store_true",
+        help="keep parent orders that executed nothing at all (dropped by "
+             "default - the report covers orders that traded, fully or in part; "
+             "a rejected order that still completed a percentage is always kept)",
     )
     ap.add_argument("--quiet", action="store_true", help="suppress progress output")
     ap.add_argument(
@@ -163,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
             args.flow,
             isins=isins,
             skip_market_data=args.no_market_data,
-            drop_unfilled_cancelled=not args.keep_unfilled_cancelled,
+            drop_unfilled=not args.keep_unfilled,
             verbose=not args.quiet,
         )
 

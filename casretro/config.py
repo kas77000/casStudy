@@ -238,11 +238,13 @@ def flow_of(basket: str | None) -> str:
 # Misc thresholds                                                              #
 # --------------------------------------------------------------------------- #
 
-#: Drop parent orders that executed nothing at all and ended cancelled.  They
-#: are pulled orders rather than close misses, so leaving them in only inflates
-#: the NOT_SENT bucket and depresses the participation rate.  Flip to False (or
-#: pass --keep-unfilled-cancelled) to see them again.
-DROP_UNFILLED_CANCELLED = True
+#: Keep only parent orders that executed something -- partially or completely.
+#: An order that put nothing away describes intent rather than execution, and it
+#: only inflates the NOT_SENT bucket and depresses the participation rate.  An
+#: order that was rejected but still completed a percentage is kept: the test is
+#: on executed quantity, not on state.  Flip to False (or pass --keep-unfilled)
+#: to see the whole book again.
+DROP_UNFILLED_ORDERS = True
 
 #: A residual smaller than this many shares (or than this fraction of the parent)
 #: is treated as "done" rather than as a genuine miss.

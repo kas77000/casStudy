@@ -43,12 +43,9 @@ def t(s: str) -> pd.Timedelta:
 # expect_reason is what the waterfall should conclude.  `None` means the order
 # is expected to have traded in the auction.
 #
-# expect_participation == PARTICIPATION_DROPPED means the order must not survive
-# the "cancelled with nothing executed" filter at all.
-
-#: Sentinel participation for a scenario the filter is expected to remove.
-PARTICIPATION_DROPPED = "DROPPED"
-DROPPED_REASON = "UNFILLED_CANCELLED"
+# The waterfall is asserted against an *unfiltered* build, so every branch stays
+# covered; the filtered build -- what a real run produces -- is then checked to
+# contain exactly the scenarios that executed something.
 
 SCENARIOS = [
     # id, sym, basket, side, sign, size, doclose, limit, expect_participation, expect_reason
@@ -64,8 +61,8 @@ SCENARIOS = [
     (110, "LT.IN",       "AGENCY_US",   "buy",  1,  5500, 1, 0.0,   "SENT_NOT_FILLED", "CLOSE_ORDER_CANCELLED"),
     (111, "MARUTI.IN",   "SILK_ASIA",   "buy",  1, 12000, 1, 0.0,   "SENT_NOT_FILLED", "NOT_MATCHED_IN_AUCTION"),
     (112, "TITAN.IN",    "AGENCY_LOW",  "sell", -1, 4500, 1, 0.0,   "FILLED_IN_CLOSE", None),
-    # pulled by the client with nothing done -- must not reach the report at all
-    (113, "NESTLEIND.IN","AGENCY_LOW",  "buy",  1,  5000, 1, 0.0,   PARTICIPATION_DROPPED, DROPPED_REASON),
+    # pulled by the client with nothing done
+    (113, "NESTLEIND.IN","AGENCY_LOW",  "buy",  1,  5000, 1, 0.0,   "NOT_SENT",        "PARENT_CANCELLED_BEFORE_CAS"),
 ]
 
 REF_PX = 100.0        # every synthetic sym trades around 100
@@ -90,6 +87,9 @@ FILLS = {
     112: (2000, 2500),
     113: (0, 0),        # nothing at all, and then cancelled
 }
+
+#: Scenarios that executed nothing: a real run must drop them.
+EXPECT_DROPPED = {tid for tid, (cont, close) in FILLS.items() if cont + close <= 0}
 
 
 def build_universe() -> pd.DataFrame:
@@ -164,7 +164,7 @@ def build_states() -> pd.DataFrame:
             snap(tid, sym, side, t("18:05:30"), "new", size, 0, 0)
             continue
 
-        cancelled = reason in ("PARENT_CANCELLED_BEFORE_CAS", DROPPED_REASON)
+        cancelled = reason == "PARENT_CANCELLED_BEFORE_CAS"
         snap(tid, sym, side, t("17:40:00"),
              "cxl:client request" if cancelled else "working",
              residual_at_cas, cont, 0)
@@ -385,7 +385,12 @@ def main() -> int:
         sym_market=sym_market, ref_px=ref_px,
     )
 
-    data = assemble(DATE, "ht", "both", raw, ["synthetic data -- selftest only"])
+    note = ["synthetic data -- selftest only"]
+    # What a real run produces: only the orders that executed something.
+    data = assemble(DATE, "ht", "both", raw, note)
+    # The same book with the filter off, so every waterfall branch is still
+    # reachable -- several of them describe orders that never traded.
+    data_all = assemble(DATE, "ht", "both", raw, note, drop_unfilled=False)
     R.print_console(data)
 
     outdir = args.out or tempfile.mkdtemp(prefix="cas_selftest_")
@@ -395,17 +400,13 @@ def main() -> int:
     print(f"  selftest output -> {outdir}\n")
 
     # -- assertions --------------------------------------------------------- #
-    got = data.orders.set_index("id_target")[["participation", "reason_code"]]
     failures = []
+
+    # 1. the waterfall, against the unfiltered book
+    got = data_all.orders.set_index("id_target")[["participation", "reason_code"]]
     for tid, _sym, _b, _side, _sg, _size, _dc, _lim, exp_part, exp_reason in SCENARIOS:
-        if exp_part == PARTICIPATION_DROPPED:
-            if tid in got.index:
-                failures.append(
-                    f"  id_target {tid}: cancelled with no executions but still in the report"
-                )
-            continue
         if tid not in got.index:
-            failures.append(f"  id_target {tid}: missing from the report")
+            failures.append(f"  id_target {tid}: missing from the unfiltered report")
             continue
         row = got.loc[tid]
         if row["participation"] != exp_part:
@@ -416,6 +417,17 @@ def main() -> int:
             failures.append(
                 f"  id_target {tid}: reason {row['reason_code']!r}, expected {exp_reason!r}"
             )
+
+    # 2. the filter: everything that traded survives, everything else is gone
+    kept = set(data.orders["id_target"])
+    expected_kept = {tid for tid, *_ in SCENARIOS} - EXPECT_DROPPED
+    if kept != expected_kept:
+        for tid in sorted(EXPECT_DROPPED & kept):
+            failures.append(f"  id_target {tid}: executed nothing but is still in the report")
+        for tid in sorted(expected_kept - kept):
+            failures.append(f"  id_target {tid}: executed something but was dropped")
+    if not data.orders.empty and float(data.orders["exec_qty"].min()) <= 0:
+        failures.append("  a surviving parent order has exec_qty <= 0")
 
     rej = data.rejections
     n_cont = int((rej["phase"] == "CONTINUOUS").sum()) if not rej.empty else 0
@@ -451,10 +463,8 @@ def main() -> int:
         if not tot.empty and abs(float(tot["fill_rate_pct"].iloc[0]) - rate) > 1e-6:
             failures.append(f"  {name} TOTAL fill_rate_pct is not make / size")
 
-    n_expected_drop = sum(1 for s in SCENARIOS if s[8] == PARTICIPATION_DROPPED)
-    if n_expected_drop and not any("cancelled without a single execution" in w
-                                   for w in data.warnings):
-        failures.append("  the unfilled-and-cancelled exclusion was not reported as a warning")
+    if EXPECT_DROPPED and not any("nothing executed at all" in w for w in data.warnings):
+        failures.append("  the unfilled-order exclusion was not reported as a warning")
 
     if failures:
         print("SELFTEST FAILED")

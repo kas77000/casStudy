@@ -312,27 +312,22 @@ def summarise_states(states: pd.DataFrame) -> pd.DataFrame:
 # Parent-order filters                                                         #
 # --------------------------------------------------------------------------- #
 
-def unfilled_cancelled_mask(orders: pd.DataFrame) -> pd.Series:
-    """Parents that never executed a single share and ended up cancelled.
+def nothing_executed_mask(orders: pd.DataFrame) -> pd.Series:
+    """Parents that executed nothing at all.
 
-    Those are pulled orders, not close misses: the client took them back before
-    anything happened, so counting them as "did not participate" only drags the
-    participation rate down with rows nobody could have traded.  A parent counts
-    as cancelled when its terminal state -- or, failing that, its final state --
-    starts with `cxl`/`cancel` (`workorder_state_kind`'s convention).
+    The report is about orders that traded -- fully or in part.  An order that
+    never put a single share away tells us about intent, not execution, whatever
+    the reason it went nowhere (pulled, rejected, arrived too late, priced out).
 
-    Needs `exec_qty`, so call it after `summarise_fills` has been merged in.
+    The test is on quantity alone, deliberately: a parent that was *rejected* and
+    still completed a percentage stays in, because it executed.  Only a strictly
+    zero `exec_qty` is dropped.
+
+    Needs `exec_qty`, so call it after the state / fill summaries are merged in.
     """
     if orders.empty:
         return pd.Series(dtype=bool)
-
-    execd = pd.to_numeric(orders.get("exec_qty"), errors="coerce").fillna(0.0)
-    cancelled = pd.Series(False, index=orders.index)
-    for col in ("terminal_state", "final_state"):
-        if col in orders.columns:
-            hit = orders[col].fillna("").astype(str).str.match(_RE_CXL)
-            cancelled = cancelled | hit.fillna(False).astype(bool)
-    return (execd <= 0) & cancelled
+    return pd.to_numeric(orders.get("exec_qty"), errors="coerce").fillna(0.0) <= 0
 
 
 # --------------------------------------------------------------------------- #
