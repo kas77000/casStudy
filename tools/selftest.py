@@ -431,9 +431,13 @@ def main() -> int:
             failures.append(f"  {name} size {body['size'].sum():,.0f} != "
                             f"child-order size {wo['size'].sum():,.0f}")
         filled = ex[ex["fillsize"] > 0]["fillsize"].sum()
-        if abs(body["filled_qty"].sum() - filled) > 1e-6:
-            failures.append(f"  {name} filled_qty {body['filled_qty'].sum():,.0f} != "
+        if abs(body["make"].sum() - filled) > 1e-6:
+            failures.append(f"  {name} make {body['make'].sum():,.0f} != "
                             f"executed {filled:,.0f}")
+        rate = body["make"].sum() / body["size"].sum() * 100.0
+        tot = mix[mix[keys[0]] == "TOTAL"]
+        if not tot.empty and abs(float(tot["fill_rate_pct"].iloc[0]) - rate) > 1e-6:
+            failures.append(f"  {name} TOTAL fill_rate_pct is not make / size")
 
     n_expected_drop = sum(1 for s in SCENARIOS if s[8] == PARTICIPATION_DROPPED)
     if n_expected_drop and not any("cancelled without a single execution" in w

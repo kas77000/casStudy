@@ -65,8 +65,19 @@ ORDER_COLS_FRONT = [
 # Frame preparation                                                            #
 # --------------------------------------------------------------------------- #
 
+#: Percentages are reported to 2 decimals; everything else keeps 6, which is
+#: enough for a price and stops float noise (100.38000000000001) reaching a CSV.
+PCT_DECIMALS = 2
+FLOAT_DECIMALS = 6
+
+
+def _is_pct(col: str) -> bool:
+    c = str(col).lower()
+    return "pct" in c or c.endswith("_pp")
+
+
 def _stringify(df: pd.DataFrame) -> pd.DataFrame:
-    """Timedeltas -> 'HH:MM:SS.mmm'; booleans -> Y/N; keeps everything else."""
+    """Timedeltas -> 'HH:MM:SS.mmm'; booleans -> Y/N; floats rounded."""
     if df is None or df.empty:
         return pd.DataFrame() if df is None else df
     out = df.copy()
@@ -76,6 +87,8 @@ def _stringify(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = s.map(td_to_str)
         elif s.dtype == bool:
             out[col] = np.where(s, "Y", "N")
+        elif pd.api.types.is_float_dtype(s):
+            out[col] = s.round(PCT_DECIMALS if _is_pct(col) else FLOAT_DECIMALS)
     return out
 
 
@@ -120,13 +133,15 @@ def _print_mix(df: pd.DataFrame, keys: list[str], title: str, max_rows: int = 20
         return
     print(f"\n  {title}")
     label_w = 46
-    print(f"    {'':<{label_w}} {'size':>13} {'make':>13} {'fill%':>7} {'make%':>7}")
+    print(f"    {'':<{label_w}} {'child':>7} {'parent':>7} {'syms':>6} "
+          f"{'size':>13} {'make':>13} {'fill%':>7}")
     for _, r in df.head(max_rows).iterrows():
         label = " / ".join(str(r[k]) for k in keys if str(r[k]))
         print(
-            f"    {label[:label_w]:<{label_w}} {_fmt(r['size'],0):>13} "
-            f"{_fmt(r['make'],0):>13} {_fmt(r['fill_rate_pct'],1):>7} "
-            f"{_fmt(r['make_pct_of_size'],1):>7}"
+            f"    {label[:label_w]:<{label_w}} {_fmt(r['n_child_orders'],0):>7} "
+            f"{_fmt(r['n_parents'],0):>7} {_fmt(r['n_syms'],0):>6} "
+            f"{_fmt(r['size'],0):>13} {_fmt(r['make'],0):>13} "
+            f"{_fmt(r['fill_rate_pct'],PCT_DECIMALS):>7}"
         )
     if len(df) > max_rows:
         print(f"    ... {len(df) - max_rows} more rows in the CSV / workbook")
@@ -214,7 +229,9 @@ def write_csvs(data: ReportData, outdir: str) -> list[str]:
         if df is None or df.empty:
             continue
         path = os.path.join(outdir, f"{sheet}.csv")
-        df.to_csv(path, index=False, float_format="%.6f")
+        # No float_format: the frames are already rounded by `_stringify`, and a
+        # fixed one would pad every percentage back out to 6 decimals.
+        df.to_csv(path, index=False)
         written.append(path)
     return written
 

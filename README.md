@@ -231,12 +231,12 @@ carried down from the parent.
 | column | meaning |
 |---|---|
 | `n_child_orders` / `n_parents` / `n_syms` | how much the row is built on |
-| `size` | child-order quantity sent |
-| `make` | quantity the algo made on those child orders (`workorder.make`) |
-| `filled_qty` | quantity actually executed, summed off the execution tape by `id_work` |
-| `fill_rate_pct` | `filled_qty / size` |
-| `make_pct_of_size` | `make / size` |
-| `pct_of_size` | the row's share of the whole table — read a rate on a 0.1% row with that in mind |
+| `size` | quantity ordered — what we sent |
+| `make` | quantity executed, summed off the execution tape by `id_work` |
+| `fill_rate_pct` | `make / size × 100` |
+
+The OMS `workorder.make` column is **not** what `make` means here: on the desk
+`make` is the executed quantity, which is what divides into a fill rate.
 
 `otype` is normalised to `MARKET` / `LIMIT`; anything else is passed through
 upper-cased rather than bucketed, so an unexpected order type is visible instead

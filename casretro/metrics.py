@@ -330,45 +330,46 @@ def timing_flags(wo: pd.DataFrame) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 
 #: Columns every mix table carries, in this order, after its grouping keys.
+#: `size` is the ordered quantity, `make` the executed quantity, and the fill
+#: rate is make / size -- the desk's vocabulary, not the OMS column names.
 MIX_METRIC_COLS = [
-    "n_child_orders", "n_parents", "n_syms",
-    "size", "make", "filled_qty",
-    "fill_rate_pct", "make_pct_of_size", "pct_of_size",
+    "n_child_orders", "n_parents", "n_syms", "size", "make", "fill_rate_pct",
 ]
 
 
 def child_order_mix_base(
     wo: pd.DataFrame, ex: pd.DataFrame, orders: pd.DataFrame
 ) -> pd.DataFrame:
-    """Child orders carrying their parent's flow/basket and their filled qty.
+    """Child orders carrying their parent's flow/basket, their size and make.
 
     The mix tables live at the *child* level: `venue` only exists there, and
     market-vs-limit is a child-order property -- that is the distinction the
-    exchange enforces during the limit-only phase.  `filled_qty` comes from the
-    execution tape keyed on `id_work`, not from the child order's own state, so
-    a partial fill counts for what it actually did.
+    exchange enforces during the limit-only phase.
+
+    `size` is the quantity we sent.  `make` is the quantity that actually
+    executed, summed off the execution tape keyed on `id_work` rather than taken
+    from the child order's own state, so a partial fill counts for what it did.
+    The OMS `workorder.make` column is deliberately not used -- it means
+    something else (what the algo earmarked) and would not divide into a fill
+    rate.
     """
     if wo is None or wo.empty:
         return pd.DataFrame(
             columns=["id_target", "sym", "flow", "basket", "venue", "otype_kind",
-                     "phase", "size", "make", "filled_qty"]
+                     "phase", "size", "make"]
         )
 
     df = wo.copy()
     df["otype_kind"] = df.get("otype", "").map(CL.otype_kind)
     df["venue"] = df.get("venue", "").astype(str).replace("", "(unknown)")
     df["size"] = pd.to_numeric(df.get("size"), errors="coerce").fillna(0.0)
-    df["make"] = (
-        pd.to_numeric(df["make"], errors="coerce").fillna(0.0)
-        if "make" in df.columns else 0.0
-    )
 
     filled = pd.Series(dtype=float)
     if ex is not None and not ex.empty and "id_work" in ex.columns:
         f = ex[ex["is_fill"]]
         if not f.empty:
             filled = f.groupby("id_work")["fillsize"].sum()
-    df["filled_qty"] = (
+    df["make"] = (
         df["id_work"].map(filled).fillna(0.0)
         if "id_work" in df.columns and not filled.empty else 0.0
     )
@@ -387,12 +388,10 @@ def child_order_mix_base(
 
 
 def mix_by(base: pd.DataFrame, keys: list[str], *, total_row: bool = True) -> pd.DataFrame:
-    """Aggregate `child_order_mix_base` over `keys`.
+    """Aggregate `child_order_mix_base` over `keys`: size, make, fill rate.
 
-    size / make / filled quantity, plus the two rates the desk reads them by:
-    `fill_rate_pct` = filled / size and `make_pct_of_size` = make / size.
-    `pct_of_size` is the group's share of the whole table, so a rate on a
-    rounding-error-sized bucket is easy to discount.
+    `fill_rate_pct` = make / size * 100.  Rows are sorted by size, biggest
+    first, and a TOTAL row closes the table.
     """
     cols = keys + MIX_METRIC_COLS
     if base is None or base.empty or not set(keys).issubset(base.columns):
@@ -405,7 +404,6 @@ def mix_by(base: pd.DataFrame, keys: list[str], *, total_row: bool = True) -> pd
         "n_syms": g["sym"].nunique() if "sym" in base.columns else g.size() * 0,
         "size": g["size"].sum(),
         "make": g["make"].sum(),
-        "filled_qty": g["filled_qty"].sum(),
     }).reset_index()
 
     if total_row and len(out) > 1:
@@ -416,16 +414,11 @@ def mix_by(base: pd.DataFrame, keys: list[str], *, total_row: bool = True) -> pd
             "n_syms": base["sym"].nunique() if "sym" in base.columns else 0,
             "size": base["size"].sum(),
             "make": base["make"].sum(),
-            "filled_qty": base["filled_qty"].sum(),
         }
         out = pd.concat([out.sort_values("size", ascending=False),
                          pd.DataFrame([tot])], ignore_index=True)
     else:
         out = out.sort_values("size", ascending=False, ignore_index=True)
 
-    size = out["size"].replace(0, np.nan)
-    grand = float(base["size"].sum())
-    out["fill_rate_pct"] = out["filled_qty"] / size * 100.0
-    out["make_pct_of_size"] = out["make"] / size * 100.0
-    out["pct_of_size"] = out["size"] / grand * 100.0 if grand else np.nan
+    out["fill_rate_pct"] = out["make"] / out["size"].replace(0, np.nan) * 100.0
     return out[cols]
