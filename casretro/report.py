@@ -44,7 +44,8 @@ SECTIONS: list[tuple[str, str, str]] = [
 #: Column order preferred at the front of the `orders` sheet.
 ORDER_COLS_FRONT = [
     "date", "flow", "basket", "id_target", "sym", "side", "size", "exec_qty",
-    "residual", "fill_pct", "participation", "reason_code", "reason_label",
+    "residual", "fill_pct", "qty_source", "exec_qty_fills",
+    "participation", "reason_code", "reason_label",
     "reason_detail", "close_qty", "close_pct_of_order", "close_pct_of_executed",
     "n_close_wo", "close_wo_rejected", "close_wo_cancelled",
     "close_wo_reject_reasons", "close_wo_cancel_reasons",

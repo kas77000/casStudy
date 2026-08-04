@@ -355,13 +355,27 @@ def _fill_defaults(orders: pd.DataFrame) -> pd.DataFrame:
         if col not in orders.columns:
             orders[col] = ""
         orders[col] = orders[col].fillna("")
-    for col in ("open_at_cas", "final_open", "max_make_close", "max_commit_close",
-                "first_state_time", "terminal_time"):
+    for col in ("open_at_cas", "final_make", "final_open", "max_make_close",
+                "max_commit_close", "first_state_time", "terminal_time"):
         if col not in orders.columns:
             orders[col] = np.nan
 
     orders["size"] = pd.to_numeric(orders["size"], errors="coerce").fillna(0.0)
-    orders["residual"] = orders["size"] - orders["exec_qty"]
+
+    # Executed and residual quantity come from the *latest* target_state row:
+    # `make` is what executed, `open` is what is left.  That row is the OMS's own
+    # final word on the parent, so it beats re-adding the execution tape.
+    #
+    # The tape total is kept as `exec_qty_fills` -- it is what feeds exec_vwap,
+    # and `_build_reconciliation` reports every parent where the two disagree.
+    # Parents with no state history at all fall back to the tape, flagged by
+    # `qty_source`.
+    orders["exec_qty_fills"] = orders["exec_qty"]
+    state_make = pd.to_numeric(orders["final_make"], errors="coerce")
+    state_open = pd.to_numeric(orders["final_open"], errors="coerce")
+    orders["qty_source"] = np.where(state_make.notna(), "TARGET_STATE", "EXECUTIONS")
+    orders["exec_qty"] = state_make.fillna(orders["exec_qty_fills"])
+    orders["residual"] = state_open.fillna(orders["size"] - orders["exec_qty"])
     orders["fill_pct"] = np.where(
         orders["size"] > 0, orders["exec_qty"] / orders["size"] * 100.0, np.nan
     )
@@ -513,19 +527,41 @@ def _build_reconciliation(
         add("parent orders present", False, "no parent orders after the flow filter")
         return pd.DataFrame(rows)
 
-    if "final_open" in orders.columns and orders["final_open"].notna().any():
-        diff = (orders["residual"] - pd.to_numeric(orders["final_open"], errors="coerce")).abs()
+    # `make` / `open` off the last state row are the reported numbers; the tape
+    # is the independent one.  A gap means one of the two feeds is incomplete.
+    if "exec_qty_fills" in orders.columns:
+        on_state = orders["qty_source"] == "TARGET_STATE"
+        diff = (orders["exec_qty"] - orders["exec_qty_fills"]).abs().where(on_state)
         bad = int((diff.fillna(0) > 0).sum())
         add(
-            "residual (size - fills) matches the final target_state.open",
+            "target_state.make agrees with the execution tape",
             bad == 0,
-            f"{bad} of {len(orders)} parent orders disagree"
+            f"{bad} of {int(on_state.sum())} parent orders disagree"
             + (f"; worst gap {diff.max():,.0f} shares" if bad else ""),
         )
+
+    no_state = int((orders["qty_source"] != "TARGET_STATE").sum())
+    add("every parent order has a usable final state row", no_state == 0,
+        f"{no_state} parent orders fell back to the execution tape for "
+        f"executed / residual quantity")
+
+    # make + open should account for the whole parent.
+    gap = (orders["size"] - orders["exec_qty"] - orders["residual"]).abs()
+    bad = int((gap.fillna(0) > 0).sum())
+    add("executed + residual matches the order quantity", bad == 0,
+        f"{bad} of {len(orders)} parent orders disagree"
+        + (f"; worst gap {gap.max():,.0f} shares" if bad else ""))
 
     over = int((orders["exec_qty"] > orders["size"]).sum())
     add("executed quantity never exceeds order quantity", over == 0,
         f"{over} parent orders over-filled")
+
+    # close_qty stays tape-based while exec_qty is state-based, so the ratio can
+    # only be trusted while this holds.
+    over_close = int((orders["close_qty"] > orders["exec_qty"]).sum())
+    add("close quantity never exceeds executed quantity", over_close == 0,
+        f"{over_close} parent orders show more traded in the auction than "
+        f"target_state.make reports in total")
 
     if ex is not None and not ex.empty and "id_work" in ex.columns:
         # Close participation is decided purely by the child order's venue, so an

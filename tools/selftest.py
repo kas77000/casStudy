@@ -142,7 +142,10 @@ def build_states() -> pd.DataFrame:
             "date": DATE, "time": time, "t_algo": time,
             "id_target": tid, "trader": "JDOE", "sym": sym, "side": side,
             "state": state, "ack": "Y",
-            "open": open_qty, "make": make_close, "leave": make_close,
+            # `make` is the executed quantity and `open` what is left -- the two
+            # columns the report reads off the latest row.  The close commitment
+            # lives in make_close / leave_close / commit_close.
+            "open": open_qty, "make": done_qty, "leave": make_close,
             "leave_vendor": 0, "commit": done_qty,
             "last_fill_price": REF_PX if done_qty else np.nan,
             "last_fill_size": 100 if done_qty else 0,
