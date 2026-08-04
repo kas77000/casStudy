@@ -78,6 +78,13 @@ python -m casretro --no-market-data --formats csv
 everything else is Agency. With `both`, `flow` is a column and every aggregate is
 broken down side by side plus a `TOTAL` row.
 
+Parent orders that were **cancelled without executing a single share** are
+dropped before anything is counted — they are pulled orders, not close misses,
+and leaving them in only inflates `NOT_SENT` and depresses the participation
+rate. The count and the quantity removed are printed and land in the run
+parameters of every output. `--keep-unfilled-cancelled` puts them back
+(`config.DROP_UNFILLED_CANCELLED` is the default).
+
 Output lands in `output/cas_retro_<date>_<flow>/`.
 
 ### Running without a database
@@ -157,7 +164,7 @@ hidden behind the first.
 | 3 | `FULLY_FILLED_BEFORE_CAS` | `target_state.open` was already 0 at 17:45 |
 | 4 | `PARENT_CANCELLED_BEFORE_CAS` | parent hit `cxl:*` before 17:45 |
 | 5 | `PARENT_DONE_BEFORE_CAS` | parent hit any terminal state before 17:45 |
-| 6 | `ORDER_END_BEFORE_CAS` | `t_end ≤ 17:45` — the deck's "participate in close = N" profile |
+| 6 | `ORDER_END_BEFORE_CAS` | `t_end ≤ 17:40` — the "participate in close = N" profile |
 | 7 | `ORDER_ARRIVED_AFTER_ENTRY_CLOSED` | first state / `t_start` at or after 18:00 |
 | 8 | `LIMIT_OUTSIDE_PRICE_BAND` | client limit below the band on a buy (above on a sell) — nothing legal to send |
 | 9 | `NO_MARKET_DATA` | no prints at all on the day; likely halted |
@@ -204,6 +211,8 @@ theme-aware HTML page.
 | `non_participation` | the orders that did not trade in the close, with the diagnosed cause |
 | `rejections` | rejected child orders, `CONTINUOUS` vs `CLOSE` |
 | `cancellations` | cancelled child orders with the reason decoded |
+| `mix_otype_basket` | size / make / fill rate by order type (market vs limit) and basket |
+| `mix_flow_venue_otype` | size / make / fill rate by flow, venue and order type |
 | `timing` | CAS deadline and order-type compliance flags |
 | `sym_stats` | per-symbol volume profile and our participation |
 | `ref_price_band` | reference price, its source, and the ±3% band |
@@ -211,6 +220,27 @@ theme-aware HTML page.
 | `workorders` | child orders |
 | `reconciliation` | data-quality checks |
 | `session_calendar` | the calendar above, HKT and IST |
+
+### The two mix tables
+
+Both live at the **child-order** level: `venue` exists nowhere else, and
+market-vs-limit is a child-order property — which is the distinction the exchange
+enforces during the limit-only phase (17:55–18:00 HKT). `flow` and `basket` are
+carried down from the parent.
+
+| column | meaning |
+|---|---|
+| `n_child_orders` / `n_parents` / `n_syms` | how much the row is built on |
+| `size` | child-order quantity sent |
+| `make` | quantity the algo made on those child orders (`workorder.make`) |
+| `filled_qty` | quantity actually executed, summed off the execution tape by `id_work` |
+| `fill_rate_pct` | `filled_qty / size` |
+| `make_pct_of_size` | `make / size` |
+| `pct_of_size` | the row's share of the whole table — read a rate on a 0.1% row with that in mind |
+
+`otype` is normalised to `MARKET` / `LIMIT`; anything else is passed through
+upper-cased rather than bucketed, so an unexpected order type is visible instead
+of hidden. Each table ends with a `TOTAL` row.
 
 ### Metrics worth knowing about
 
@@ -264,8 +294,11 @@ change if your data says otherwise.
 
 4. **`t_end` as a participation signal.** The deck's close-participation table
    maps `Y`/blank → 18:05 HKT, `N` → 17:45 HKT for CAS names (18:00 for non-CAS).
-   The waterfall uses `t_end ≤ 17:45` as the "N" signal, ranked *below* `doclose`,
-   so an explicit `doclose = 0` always wins.
+   Our own orders do not follow it: most parents that *do* trade in the close
+   carry a `t_end` between 17:40 and 17:45 HKT, so `t_end ≤ 17:45` would flag the
+   participating majority. The waterfall therefore uses
+   `t_end ≤ config.TEND_NO_CLOSE_CUTOFF` (17:40 HKT) as the "N" signal, ranked
+   *below* `doclose`, so an explicit `doclose = 0` always wins.
 
 5. **`RESIDUAL_ABS_TOL` / `RESIDUAL_PCT_TOL`** — how small a residual has to be
    before the order counts as done rather than as a genuine miss. Currently 0

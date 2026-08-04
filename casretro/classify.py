@@ -38,7 +38,7 @@ NOT_SENT_REASONS = {
     "FULLY_FILLED_BEFORE_CAS": "Parent order was already complete when continuous trading ended",
     "PARENT_CANCELLED_BEFORE_CAS": "Parent order was cancelled before the auction",
     "PARENT_DONE_BEFORE_CAS": "Parent order reached a terminal state before the auction",
-    "ORDER_END_BEFORE_CAS": "t_end sits at or before the end of continuous (17:45 HKT)",
+    "ORDER_END_BEFORE_CAS": "t_end stops well before the end of continuous (at or before 17:40 HKT)",
     "ORDER_ARRIVED_AFTER_ENTRY_CLOSED": "Order reached the algo after order entry closed (18:00 HKT)",
     "LIMIT_OUTSIDE_PRICE_BAND": "Client limit sits outside the +/-3% CAS price band - no child order could be priced",
     "ALGO_NEVER_COMMITTED_TO_CLOSE": "Residual was live but the algo never committed any quantity to the close",
@@ -69,6 +69,7 @@ _RE_CXL = re.compile(r"^\s*(cxl|cancel)", re.I)
 _RE_REJ = re.compile(r"rej", re.I)
 _RE_FILL = re.compile(r"^\s*(fill|done|complete)", re.I)
 _RE_MARKET_OTYPE = re.compile(r"^\s*(mkt|market|mo)\b", re.I)
+_RE_LIMIT_OTYPE = re.compile(r"^\s*(limit|lim|lmt|lo)\b", re.I)
 
 
 # --------------------------------------------------------------------------- #
@@ -95,6 +96,23 @@ def state_reason(state: str) -> str:
     if ":" in x:
         return x.split(":", 1)[1].strip()
     return ""
+
+
+def otype_kind(otype) -> str:
+    """`mkt`/`market`/`mo` -> MARKET, `limit`/`lmt`/`lo` -> LIMIT.
+
+    Anything else is passed through upper-cased rather than bucketed into a
+    catch-all, so an unexpected order type shows up in the mix tables under its
+    own name instead of hiding.
+    """
+    x = str(otype or "").strip()
+    if not x or x.lower() in ("nan", "none"):
+        return "UNKNOWN"
+    if _RE_MARKET_OTYPE.match(x):
+        return "MARKET"
+    if _RE_LIMIT_OTYPE.match(x):
+        return "LIMIT"
+    return x.upper()
 
 
 def is_terminal_parent_state(state: str) -> bool:
@@ -285,6 +303,33 @@ def summarise_states(states: pd.DataFrame) -> pd.DataFrame:
     ).str.match(_RE_CXL).fillna(False)
 
     return out.reset_index()
+
+
+# --------------------------------------------------------------------------- #
+# Parent-order filters                                                         #
+# --------------------------------------------------------------------------- #
+
+def unfilled_cancelled_mask(orders: pd.DataFrame) -> pd.Series:
+    """Parents that never executed a single share and ended up cancelled.
+
+    Those are pulled orders, not close misses: the client took them back before
+    anything happened, so counting them as "did not participate" only drags the
+    participation rate down with rows nobody could have traded.  A parent counts
+    as cancelled when its terminal state -- or, failing that, its final state --
+    starts with `cxl`/`cancel` (`workorder_state_kind`'s convention).
+
+    Needs `exec_qty`, so call it after `summarise_fills` has been merged in.
+    """
+    if orders.empty:
+        return pd.Series(dtype=bool)
+
+    execd = pd.to_numeric(orders.get("exec_qty"), errors="coerce").fillna(0.0)
+    cancelled = pd.Series(False, index=orders.index)
+    for col in ("terminal_state", "final_state"):
+        if col in orders.columns:
+            hit = orders[col].fillna("").astype(str).str.match(_RE_CXL)
+            cancelled = cancelled | hit.fillna(False).astype(bool)
+    return (execd <= 0) & cancelled
 
 
 # --------------------------------------------------------------------------- #
@@ -539,12 +584,13 @@ def diagnose_row(r: pd.Series) -> pd.Series:
 
     if code is None:
         t_end = r.get("t_end")
-        if pd.notna(t_end) and pd.Timedelta(t_end) <= td(C.CTS_END):
+        if pd.notna(t_end) and pd.Timedelta(t_end) <= td(C.TEND_NO_CLOSE_CUTOFF):
+            lo, hi = C.TEND_CLOSE_PARTICIPATION_WINDOW
             code = "ORDER_END_BEFORE_CAS"
             notes.append(
                 f"t_end={td_to_str(t_end)} HKT "
-                f"(a CAS name that participates carries "
-                f"{C.EXPECTED_TEND_CAS_PARTICIPATING.strftime('%H:%M')})"
+                f"(a CAS name that participates carries a t_end between "
+                f"{lo.strftime('%H:%M')} and {hi.strftime('%H:%M')})"
             )
 
     if code is None:

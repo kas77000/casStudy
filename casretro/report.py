@@ -28,6 +28,10 @@ SECTIONS: list[tuple[str, str, str]] = [
     ("non_participation", "non_participation", "Orders that did not trade in the close"),
     ("rejections", "rejections", "Rejected child orders"),
     ("cancellations", "cancellations", "Cancelled child orders"),
+    ("mix_otype_basket", "mix_otype_basket",
+     "Size / make / fill rate by order type and basket"),
+    ("mix_flow_venue_otype", "mix_flow_venue_otype",
+     "Size / make / fill rate by flow, venue and order type"),
     ("timing", "timing", "CAS timing and compliance"),
     ("sym_stats", "sym_stats", "Per-symbol volume and participation"),
     ("ref_prices", "ref_price_band", "Reference price and +/-3% band"),
@@ -110,6 +114,24 @@ def _fmt(v, nd: int = 2, pct: bool = False) -> str:
     return f"{v:,.{nd}f}"
 
 
+def _print_mix(df: pd.DataFrame, keys: list[str], title: str, max_rows: int = 20) -> None:
+    """Console rendering of a mix table -- keys, then size / make / fill rate."""
+    if df is None or df.empty:
+        return
+    print(f"\n  {title}")
+    label_w = 46
+    print(f"    {'':<{label_w}} {'size':>13} {'make':>13} {'fill%':>7} {'make%':>7}")
+    for _, r in df.head(max_rows).iterrows():
+        label = " / ".join(str(r[k]) for k in keys if str(r[k]))
+        print(
+            f"    {label[:label_w]:<{label_w}} {_fmt(r['size'],0):>13} "
+            f"{_fmt(r['make'],0):>13} {_fmt(r['fill_rate_pct'],1):>7} "
+            f"{_fmt(r['make_pct_of_size'],1):>7}"
+        )
+    if len(df) > max_rows:
+        print(f"    ... {len(df) - max_rows} more rows in the CSV / workbook")
+
+
 def print_console(data: ReportData) -> None:
     d = data.date.isoformat() if data.date else "(real time)"
     print()
@@ -155,6 +177,11 @@ def print_console(data: ReportData) -> None:
                   f"{_fmt(row['qty'],0):>14} shares")
             if label:
                 print(f"      {label}")
+
+    _print_mix(data.mix_otype_basket, ["otype_kind", "basket"],
+               "size / make / fill rate by order type and basket")
+    _print_mix(data.mix_flow_venue_otype, ["flow", "venue", "otype_kind"],
+               "size / make / fill rate by flow, venue and order type")
 
     if not data.benchmark.empty:
         print("\n  volume share vs the desk benchmarks")

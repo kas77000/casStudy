@@ -134,6 +134,20 @@ EXPECTED_TEND_CAS_NOT_PARTICIPATING = T("17:45")
 #: Non-CAS names: 18:00 HKT / 15:30 IST whatever the flag.
 EXPECTED_TEND_NON_CAS = T("18:00")
 
+#: What we actually observe on the desk, which is *not* what the deck says: most
+#: parents that do go on to trade in the close carry a `t_end` inside the last
+#: few minutes of continuous -- after 17:40 and before 17:45 HKT -- rather than
+#: the 18:05 of the table above.  So `t_end <= 17:45` cannot be read as "this
+#: order was never meant to trade in the close": it would flag the participating
+#: majority.  Only a `t_end` at or before this cutoff is treated as the "N"
+#: profile.  Raise it back to CTS_END if a desk really does book `N` orders at
+#: 17:45.
+TEND_NO_CLOSE_CUTOFF = T("17:40")
+
+#: The observed `t_end` window of a close-participating parent, used for the
+#: explanatory note attached to ORDER_END_BEFORE_CAS.
+TEND_CLOSE_PARTICIPATION_WINDOW = (TEND_NO_CLOSE_CUTOFF, CTS_END)
+
 
 # --------------------------------------------------------------------------- #
 # Exchange rules                                                               #
@@ -223,6 +237,12 @@ def flow_of(basket: str | None) -> str:
 # --------------------------------------------------------------------------- #
 # Misc thresholds                                                              #
 # --------------------------------------------------------------------------- #
+
+#: Drop parent orders that executed nothing at all and ended cancelled.  They
+#: are pulled orders rather than close misses, so leaving them in only inflates
+#: the NOT_SENT bucket and depresses the participation rate.  Flip to False (or
+#: pass --keep-unfilled-cancelled) to see them again.
+DROP_UNFILLED_CANCELLED = True
 
 #: A residual smaller than this many shares (or than this fraction of the parent)
 #: is treated as "done" rather than as a genuine miss.

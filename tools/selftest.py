@@ -42,6 +42,13 @@ def t(s: str) -> pd.Timedelta:
 #
 # expect_reason is what the waterfall should conclude.  `None` means the order
 # is expected to have traded in the auction.
+#
+# expect_participation == PARTICIPATION_DROPPED means the order must not survive
+# the "cancelled with nothing executed" filter at all.
+
+#: Sentinel participation for a scenario the filter is expected to remove.
+PARTICIPATION_DROPPED = "DROPPED"
+DROPPED_REASON = "UNFILLED_CANCELLED"
 
 SCENARIOS = [
     # id, sym, basket, side, sign, size, doclose, limit, expect_participation, expect_reason
@@ -57,6 +64,8 @@ SCENARIOS = [
     (110, "LT.IN",       "AGENCY_US",   "buy",  1,  5500, 1, 0.0,   "SENT_NOT_FILLED", "CLOSE_ORDER_CANCELLED"),
     (111, "MARUTI.IN",   "SILK_ASIA",   "buy",  1, 12000, 1, 0.0,   "SENT_NOT_FILLED", "NOT_MATCHED_IN_AUCTION"),
     (112, "TITAN.IN",    "AGENCY_LOW",  "sell", -1, 4500, 1, 0.0,   "FILLED_IN_CLOSE", None),
+    # pulled by the client with nothing done -- must not reach the report at all
+    (113, "NESTLEIND.IN","AGENCY_LOW",  "buy",  1,  5000, 1, 0.0,   PARTICIPATION_DROPPED, DROPPED_REASON),
 ]
 
 REF_PX = 100.0        # every synthetic sym trades around 100
@@ -79,6 +88,7 @@ FILLS = {
     110: (2000, 0),
     111: (5000, 0),
     112: (2000, 2500),
+    113: (0, 0),        # nothing at all, and then cancelled
 }
 
 
@@ -109,7 +119,11 @@ def build_targets() -> pd.DataFrame:
             "limit_price": limit,
             "t_oes_load": t("09:25:00"), "t_gen": t("09:29:00"),
             "t_start": t("18:05:00") if tid == 107 else t("09:30:00"),
-            "t_end": t("17:45:00") if tid == 106 else t("18:05:00"),
+            # 106 is the "participate in close = N" profile: it stops well before
+            # the cutoff.  Everyone else carries a t_end inside the last minutes
+            # of continuous, which is what a participating parent looks like on
+            # the desk (see config.TEND_NO_CLOSE_CUTOFF).
+            "t_end": t("17:30:00") if tid == 106 else t("17:44:00"),
             "p_start": "", "p_end": "CLOSE",
             "algo": "CLOSE_SEEKER", "alpha": 0.5, "beta": 0.0, "gamma": 0.0,
             "delta": 0.0, "iwould": 0.0, "stealth": 0,
@@ -147,8 +161,9 @@ def build_states() -> pd.DataFrame:
             snap(tid, sym, side, t("18:05:30"), "new", size, 0, 0)
             continue
 
+        cancelled = reason in ("PARENT_CANCELLED_BEFORE_CAS", DROPPED_REASON)
         snap(tid, sym, side, t("17:40:00"),
-             "cxl:client request" if reason == "PARENT_CANCELLED_BEFORE_CAS" else "working",
+             "cxl:client request" if cancelled else "working",
              residual_at_cas, cont, 0)
         snap(tid, sym, side, t("17:57:00"), "working", residual_at_cas, cont, committed)
         snap(tid, sym, side, t("18:10:00"), "done", size - cont - close, cont + close, committed)
@@ -179,6 +194,9 @@ def build_workorders() -> pd.DataFrame:
             "onmkt_bidprice": REF_PX - 0.05, "onmkt_askprice": REF_PX + 0.05,
         }
         base.update(kw)
+        base.setdefault("size", 0)
+        if not base.get("make"):
+            base["make"] = base["size"]   # the algo made everything it sent
         rows.append(base)
 
     for tid, sym, _b, side, _sg, size, _dc, _lim, _p, _reason in SCENARIOS:
@@ -206,8 +224,11 @@ def build_workorders() -> pd.DataFrame:
                t_oes_send=t("17:53:00"), t_gen=t("17:52:59"),
                t_on_market=t("17:53:01"))
         if close > 0:       # traded in the auction
+            # 101 goes in as a market order during the limit-and-market phase,
+            # so both otype kinds show up in the mix tables.
             wo(id_target=tid, sym=sym, side=side, size=close,
                venue="NSE_CLOSE", venuetype="CLOSE", state="filled",
+               otype="market" if tid == 101 else "limit",
                price=CLOSE_FILL_PX, time=t("18:00:30"), t_oes_send=t("17:51:00"),
                t_gen=t("17:50:59"), t_on_market=t("17:51:01"))
 
@@ -365,6 +386,15 @@ def main() -> int:
     got = data.orders.set_index("id_target")[["participation", "reason_code"]]
     failures = []
     for tid, _sym, _b, _side, _sg, _size, _dc, _lim, exp_part, exp_reason in SCENARIOS:
+        if exp_part == PARTICIPATION_DROPPED:
+            if tid in got.index:
+                failures.append(
+                    f"  id_target {tid}: cancelled with no executions but still in the report"
+                )
+            continue
+        if tid not in got.index:
+            failures.append(f"  id_target {tid}: missing from the report")
+            continue
         row = got.loc[tid]
         if row["participation"] != exp_part:
             failures.append(
@@ -386,6 +416,29 @@ def main() -> int:
     cxl = data.cancellations
     if cxl.empty or "price moved away" not in set(cxl["reason"]):
         failures.append("  the cxl:<reason> decoding did not produce 'price moved away'")
+
+    for name, keys in (("mix_otype_basket", ["otype_kind", "basket"]),
+                       ("mix_flow_venue_otype", ["flow", "venue", "otype_kind"])):
+        mix = getattr(data, name)
+        if mix.empty:
+            failures.append(f"  {name} came back empty")
+            continue
+        body = mix[mix[keys[0]] != "TOTAL"]
+        if not {"MARKET", "LIMIT"} <= set(body["otype_kind"]):
+            failures.append(f"  {name} does not split market vs limit: "
+                            f"{sorted(set(body['otype_kind']))}")
+        if abs(body["size"].sum() - wo["size"].sum()) > 1e-6:
+            failures.append(f"  {name} size {body['size'].sum():,.0f} != "
+                            f"child-order size {wo['size'].sum():,.0f}")
+        filled = ex[ex["fillsize"] > 0]["fillsize"].sum()
+        if abs(body["filled_qty"].sum() - filled) > 1e-6:
+            failures.append(f"  {name} filled_qty {body['filled_qty'].sum():,.0f} != "
+                            f"executed {filled:,.0f}")
+
+    n_expected_drop = sum(1 for s in SCENARIOS if s[8] == PARTICIPATION_DROPPED)
+    if n_expected_drop and not any("cancelled without a single execution" in w
+                                   for w in data.warnings):
+        failures.append("  the unfilled-and-cancelled exclusion was not reported as a warning")
 
     if failures:
         print("SELFTEST FAILED")

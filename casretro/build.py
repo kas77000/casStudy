@@ -55,6 +55,8 @@ class ReportData:
     cancellations: pd.DataFrame
     workorders: pd.DataFrame
     executions: pd.DataFrame
+    mix_otype_basket: pd.DataFrame
+    mix_flow_venue_otype: pd.DataFrame
     sym_stats: pd.DataFrame
     benchmark: pd.DataFrame
     ref_prices: pd.DataFrame
@@ -81,6 +83,13 @@ def _as_td(df: pd.DataFrame, cols) -> None:
     for c in cols:
         if c in df.columns:
             df[c] = pd.to_timedelta(df[c], errors="coerce")
+
+
+def _without_ids(df: pd.DataFrame, ids: set) -> pd.DataFrame:
+    """Drop every row belonging to one of `ids` (no-op if there is no id_target)."""
+    if df is None or df.empty or "id_target" not in df.columns:
+        return df
+    return df[~df["id_target"].isin(ids)].reset_index(drop=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -175,11 +184,15 @@ def assemble(
     flow: str,
     raw: RawFrames,
     warnings: list[str] | None = None,
+    *,
+    drop_unfilled_cancelled: bool = C.DROP_UNFILLED_CANCELLED,
 ) -> ReportData:
     warnings = list(warnings or [])
 
     wo = CL.enrich_workorders(raw.workorders)
     ex = CL.enrich_executions(raw.executions, wo)
+    states = raw.states
+    alerts = raw.alerts
 
     orders = raw.targets.copy()
     if not orders.empty:
@@ -188,16 +201,38 @@ def assemble(
         _as_td(orders, ["time", "t_start", "t_end", "t_gen", "t_oes_load"])
 
         for extra in (
-            CL.summarise_states(raw.states),
+            CL.summarise_states(states),
             CL.summarise_fills(ex),
             CL.summarise_close_workorders(wo),
-            CL.summarise_alerts(raw.alerts),
+            CL.summarise_alerts(alerts),
             M.timing_flags(wo),
         ):
             if extra is not None and not extra.empty:
                 orders = orders.merge(extra, on="id_target", how="left")
 
         orders = _fill_defaults(orders)
+
+        # pulled orders ------------------------------------------------------ #
+        # Cancelled with nothing executed: dropped here, before anything is
+        # counted, so the waterfall, the per-sym stats and the participation
+        # rate all see the same population.
+        if drop_unfilled_cancelled:
+            drop = CL.unfilled_cancelled_mask(orders)
+            n_drop = int(drop.sum())
+            if n_drop:
+                dropped_ids = set(orders.loc[drop, "id_target"])
+                dropped_qty = float(orders.loc[drop, "size"].sum())
+                orders = orders[~drop].reset_index(drop=True)
+                wo = _without_ids(wo, dropped_ids)
+                ex = _without_ids(ex, dropped_ids)
+                states = _without_ids(states, dropped_ids)
+                alerts = _without_ids(alerts, dropped_ids)
+                warnings.append(
+                    f"{n_drop} parent order{'s' if n_drop != 1 else ''} "
+                    f"({dropped_qty:,.0f} shares) excluded: "
+                    f"cancelled without a single execution "
+                    f"(--keep-unfilled-cancelled to keep them)"
+                )
 
         # market context ---------------------------------------------------- #
         if raw.ref_px is not None and not raw.ref_px.empty:
@@ -231,9 +266,13 @@ def assemble(
     rej = CL.rejections(wo, ex, orders)
     cxl = CL.cancellations(wo, orders)
 
+    mix_base = M.child_order_mix_base(wo, ex, orders)
+    mix_otype_basket = M.mix_by(mix_base, ["otype_kind", "basket"])
+    mix_flow_venue_otype = M.mix_by(mix_base, ["flow", "venue", "otype_kind"])
+
     sym_stats = _build_sym_stats(orders, raw.sym_market, ex)
     bench = _build_benchmark(sym_stats)
-    recon = _build_reconciliation(orders, ex, raw.states)
+    recon = _build_reconciliation(orders, ex, states)
     summary = _build_summary(orders, rej, cxl)
     timing = _build_timing(orders)
 
@@ -246,11 +285,13 @@ def assemble(
         cancellations=cxl,
         workorders=wo,
         executions=ex,
+        mix_otype_basket=mix_otype_basket,
+        mix_flow_venue_otype=mix_flow_venue_otype,
         sym_stats=sym_stats,
         benchmark=bench,
         ref_prices=raw.ref_px,
         timing=timing,
-        alerts=raw.alerts,
+        alerts=alerts,
         reconciliation=recon,
         summary=summary,
         sessions=S.session_table(),
@@ -265,13 +306,21 @@ def build_report(
     *,
     isins: list[str] | None = None,
     skip_market_data: bool = False,
+    drop_unfilled_cancelled: bool = C.DROP_UNFILLED_CANCELLED,
     verbose: bool = True,
 ) -> ReportData:
     raw, warnings = load_frames(
         pool, date, flow, isins=isins,
         skip_market_data=skip_market_data, verbose=verbose,
     )
-    return assemble(date, pool.mode, flow, raw, warnings)
+    data = assemble(
+        date, pool.mode, flow, raw, warnings,
+        drop_unfilled_cancelled=drop_unfilled_cancelled,
+    )
+    if verbose:
+        for w in data.warnings[len(warnings):]:
+            print(f"[info] {w}", flush=True)
+    return data
 
 
 # --------------------------------------------------------------------------- #
