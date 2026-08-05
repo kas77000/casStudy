@@ -299,6 +299,129 @@ def combine(
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Backend loading                                                              #
+# --------------------------------------------------------------------------- #
+
+class BackendUnavailable(Exception):
+    """A backend could not be loaded, with the reason kept apart from the fix."""
+
+    def __init__(self, backend: str, reason: str, remedy: str = ""):
+        super().__init__(reason)
+        self.backend = backend
+        self.reason = reason
+        self.remedy = remedy
+
+
+PIP_HINT = {
+    "xbbg": "pip install xbbg",
+    "blpapi": ("pip install --index-url="
+               "https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi"),
+}
+
+CPP_SDK_HINT = (
+    "The package is installed but its C++ SDK library could not be loaded.\n"
+    "    Install the Bloomberg C++ SDK and put its shared library on the loader path:\n"
+    "      Windows : <sdk>\\bin on PATH          (blpapi3_64.dll)\n"
+    "      Linux   : <sdk>/Linux on LD_LIBRARY_PATH (libblpapi3_64.so)\n"
+    "      macOS   : <sdk>/Darwin on DYLD_LIBRARY_PATH\n"
+    "    Setting BLPAPI_ROOT to the SDK directory is usually enough.\n"
+    "    Run this script with --diagnose to see what is and is not loadable."
+)
+
+
+def probe_backend(backend: str):
+    """Import a backend, classifying failure precisely.
+
+    The distinction that matters: `ModuleNotFoundError` for the backend itself
+    means it really is not installed, while a bare `ImportError` means the
+    package is there but would not load -- nearly always the blpapi C++ SDK
+    missing from the loader path.  Reporting the second as "not installed" sends
+    you off to pip, which will cheerfully tell you it is already satisfied.
+    """
+    try:
+        if backend == "xbbg":
+            from xbbg import blp
+            return blp
+        import blpapi
+        return blpapi
+    except ModuleNotFoundError as exc:
+        missing = (getattr(exc, "name", "") or "").split(".")[0]
+        if missing == backend or not missing:
+            raise BackendUnavailable(
+                backend, f"the {backend} package is not installed",
+                PIP_HINT[backend],
+            ) from exc
+        raise BackendUnavailable(
+            backend,
+            f"{backend} is installed, but its dependency {missing!r} is missing",
+            PIP_HINT.get(missing, f"pip install {missing}"),
+        ) from exc
+    except ImportError as exc:
+        raise BackendUnavailable(
+            backend, f"{backend} is installed but failed to load: {exc}", CPP_SDK_HINT
+        ) from exc
+
+
+def diagnose() -> int:
+    """Report what is importable, and from which interpreter."""
+    import importlib.util
+    import platform
+
+    try:
+        import importlib.metadata as md
+    except ImportError:  # pragma: no cover
+        md = None
+
+    print("environment")
+    print(f"  python      : {sys.version.split()[0]}")
+    print(f"  executable  : {sys.executable}")
+    print(f"  platform    : {platform.platform()}")
+    print(f"  BLPAPI_ROOT : {os.environ.get('BLPAPI_ROOT', '(not set)')}")
+
+    print("\npackages")
+    loadable = []
+    for name in ("xbbg", "blpapi"):
+        try:
+            spec = importlib.util.find_spec(name)
+        except Exception as exc:
+            spec = None
+            print(f"  {name:<8} find_spec failed: {exc}")
+        version = ""
+        if md is not None:
+            try:
+                version = md.version(name)
+            except Exception:
+                version = "(no dist metadata)"
+        if spec is None:
+            print(f"  {name:<8} NOT FOUND on this interpreter's path")
+            continue
+        print(f"  {name:<8} found   {version}")
+        print(f"           {getattr(spec, 'origin', '') or '(namespace package)'}")
+        try:
+            probe_backend(name)
+            print(f"           import OK")
+            loadable.append(name)
+        except BackendUnavailable as exc:
+            print(f"           IMPORT FAILED: {exc.reason}")
+
+    print()
+    if loadable:
+        print(f"  usable backend(s): {', '.join(loadable)}")
+        return 0
+
+    print("  no usable backend.", file=sys.stderr)
+    print(
+        "\n  If a package shows as NOT FOUND but you know you installed it, you are\n"
+        "  almost certainly running a different interpreter than the one you pip\n"
+        f"  installed into. Try:  {sys.executable} -m pip install xbbg\n"
+        "\n  If it is found but the import fails, it is the C++ SDK, not the wheel:\n"
+        f"  {CPP_SDK_HINT}",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def write_csv(rows: list[dict], path: str) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as fh:
@@ -318,35 +441,75 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--host", default="localhost", help="blpapi host (default: localhost)")
     ap.add_argument("--port", type=int, default=8194, help="blpapi port (default: 8194)")
     ap.add_argument("--backend", choices=("auto", "xbbg", "blpapi"), default="auto")
+    ap.add_argument("--diagnose", action="store_true",
+                    help="report which backends are importable, and from which "
+                         "interpreter, then exit")
+    ap.add_argument("--traceback", action="store_true",
+                    help="print the full traceback when a backend fails")
     args = ap.parse_args(argv)
+
+    if args.diagnose:
+        return diagnose()
 
     asof = dt.date.fromisoformat(args.date) if args.date else None
 
     backends = ("xbbg", "blpapi") if args.backend == "auto" else (args.backend,)
     weights = details = None
     source = ""
-    errors = []
+    load_errors: list[BackendUnavailable] = []
+    call_errors: list[str] = []
+
     for backend in backends:
+        # Loading and calling are separated on purpose.  Wrapping both in one
+        # `except ImportError` reported a Bloomberg request that happened to
+        # raise ImportError as "not installed", and vice versa.
+        try:
+            probe_backend(backend)
+        except BackendUnavailable as exc:
+            load_errors.append(exc)
+            continue
+
         try:
             if backend == "xbbg":
                 weights, details, source = fetch_via_xbbg(args.index, asof)
             else:
-                weights, details, source = fetch_via_blpapi(args.index, asof, args.host, args.port)
+                weights, details, source = fetch_via_blpapi(
+                    args.index, asof, args.host, args.port
+                )
             print(f"[info] backend = {backend}")
             break
-        except ImportError as exc:
-            errors.append(f"{backend}: not installed ({exc})")
         except Exception as exc:
-            errors.append(f"{backend}: {exc}")
+            if args.traceback:
+                import traceback
+                traceback.print_exc()
+            call_errors.append(f"{backend} loaded fine, but the request failed: {exc}")
 
     if weights is None:
-        print("Could not reach Bloomberg.\n  " + "\n  ".join(errors), file=sys.stderr)
-        print(
-            "\nInstall one of them on the Bloomberg machine:\n"
-            "  pip install xbbg     (wraps blpapi, simplest)\n"
-            "  pip install blpapi --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/",
-            file=sys.stderr,
-        )
+        print("Could not pull the index from Bloomberg.\n", file=sys.stderr)
+
+        for exc in load_errors:
+            print(f"  [{exc.backend}] {exc.reason}", file=sys.stderr)
+            if exc.remedy:
+                print(f"    -> {exc.remedy}", file=sys.stderr)
+        for msg in call_errors:
+            print(f"  [{msg}", file=sys.stderr)
+
+        if call_errors:
+            # The packages are fine; this is a session, entitlement or ticker
+            # problem, so do not send anyone back to pip.
+            print(
+                f"\n  The backend imported, so this is not an install problem.\n"
+                f"  Check that the Terminal is running and logged in, that "
+                f"{args.host}:{args.port} is the\n"
+                f"  right endpoint, and that {args.index!r} is a ticker you are "
+                f"entitled to.\n"
+                f"  Re-run with --traceback for the full error.",
+                file=sys.stderr,
+            )
+        elif load_errors:
+            print(f"\n  Run  {sys.executable} {sys.argv[0]} --diagnose  to see which "
+                  f"interpreter\n  is being used and what it can import.",
+                  file=sys.stderr)
         return 2
 
     rows = combine(args.index, asof, source, weights, details)

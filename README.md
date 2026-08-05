@@ -386,6 +386,7 @@ tools/
   selftest.py          synthetic end-to-end run, no database needed
   dump_queries.py      print every q query without touching a database
   bloomberg_nifty50.py NIFTY 50 members + weights   (Bloomberg machine)
+  bloomberg_check.py   8-stage check that Bloomberg works (Bloomberg machine)
   map_nifty50_syms.py  resolve each member to a kdb sym   (kdb machine)
 config/
   instances.json host/port per instance
@@ -413,14 +414,48 @@ the reference price and the volume either side of the auction.
 Two scripts, because Bloomberg and kdb do not live on the same machine.
 
 **Step 1 — on the Bloomberg machine.** Needs a Terminal or B-PIPE session and
-either `xbbg` or `blpapi`; nothing else from this project, so the file can be
-copied over on its own.
+either `xbbg` or `blpapi`. Copy `bloomberg_nifty50.py` and `bloomberg_check.py`
+across; they depend on nothing else in this project.
+
+Check the setup first — it walks the same path one stage at a time, so a failure
+says *which* thing is broken:
+
+```bash
+python tools/bloomberg_check.py                     # 8 stages, exit 0 if all pass
+python tools/bloomberg_check.py --date 2026-08-04   # also exercises END_DATE_OVERRIDE
+python tools/bloomberg_check.py --verbose           # show the data each stage got
+```
+
+```
+  [1/8] environment                             PASS   python 3.11.4 at C:\...\python.exe
+  [2/8] import backend                          PASS   xbbg 0.7.7 loaded
+  [3/8] session / //blp/refdata                 SKIP   xbbg opens its own session
+  [4/8] reference data on 'NIFTY Index'         PASS   NAME = NIFTY 50 Index
+  [5/8] INDX_MWEIGHT (current basket)           PASS   50 members, weights sum to 100.00%
+  [6/8] INDX_MWEIGHT_HIST + END_DATE_OVERRIDE   PASS   50 members as of 2026-08-04
+  [7/8] ID_ISIN on the members                  PASS   all 5 sampled members have an ISIN
+  [8/8] end-to-end fetch (the real code path)   PASS   50 rows, 50 with an ISIN
+```
+
+Stage 7 is not decoration: `map_nifty50_syms.py` matches on ISIN and nothing
+else, so a member without one cannot be mapped at all.
+
+Then the pull itself:
 
 ```bash
 python tools/bloomberg_nifty50.py --out config/nifty50.csv
 python tools/bloomberg_nifty50.py --date 2026-08-04       # that day's basket
 python tools/bloomberg_nifty50.py --index "NIFTY Index"   # or any other index
+python tools/bloomberg_nifty50.py --diagnose              # what is importable, and from where
+python tools/bloomberg_nifty50.py --traceback             # full stack on failure
 ```
+
+> **If it reports a backend as not installed when you know it is:** that was a
+> bug, fixed. `blpapi` raises a plain `ImportError` — not `ModuleNotFoundError` —
+> when the wheel is installed but its **C++ SDK library** cannot be loaded, and
+> `xbbg` imports `blpapi` so it failed identically. Both were reported as "not
+> installed". They are now told apart, and `--diagnose` prints the interpreter in
+> use, `BLPAPI_ROOT`, and each package's location and real import error.
 
 Weights come from `INDX_MWEIGHT_HIST` with an `END_DATE_OVERRIDE`. If that field
 returns nothing the script falls back to `INDX_MWEIGHT` — the *current* basket —
