@@ -99,6 +99,16 @@ The **ISIN whitelist is applied again at read time**, so narrowing
 needs a re-export. That also means you can export once with `--no-isin-filter`
 and let the whitelist do the narrowing from then on.
 
+**`casStudy.py` reads the same file**, with one extra requirement. It splits the
+universe into CAS and non-CAS and uses the non-CAS names as its control arm, so a
+CAS-only snapshot would leave S5 with nothing to measure. It refuses to run on
+one, and says so. `--no-isin-filter` produces a file that serves both scripts —
+which is why it is the recommended form:
+
+```bash
+python tools/export_cas_universe.py --no-isin-filter
+```
+
 > **What ages.** `sym`, `ID_ISIN`, `TICKER`, `NAME` are static. `adv`,
 > `fx_last`, `CUR_MKT_CAP` and especially `px_last_prev` are that day's values,
 > and `px_last_prev` is the last fallback of the CAS reference price. The

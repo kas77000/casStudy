@@ -16,6 +16,13 @@ the live path cannot drift apart in shape.  The ISIN whitelist is applied again
 at read time, so narrowing `config/cas_isins.txt` takes effect immediately --
 only a change of *reference data* needs a re-export.
 
+**Two consumers, and they want different scopes.**  `casretro` narrows whatever
+it reads with the whitelist, so either export serves it.  `casStudy.py` splits
+the file into CAS and non-CAS and uses the non-CAS names as its control arm, so a
+CAS-only snapshot leaves it with nothing to control against -- it refuses to run
+on one.  Exporting with `--no-isin-filter` produces a file that satisfies both,
+which is why it is the recommended form.
+
 **What ages.** `sym`, `ID_ISIN`, `TICKER`, `NAME` are static. `adv`, `fx_last`,
 `CUR_MKT_CAP` and especially `px_last_prev` are that day's values, and
 `px_last_prev` is the last fallback of the CAS reference price. The snapshot date
@@ -125,6 +132,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  [warn] {n_null} row(s) have no {col}", file=sys.stderr)
 
     print(f"\n  casretro will now read the universe from this file.")
+    if isins:
+        print(f"  casStudy.py will REFUSE it: {len(out):,} CAS-eligible names and no\n"
+              f"  control arm. Re-export with --no-isin-filter --force to serve both.")
+    else:
+        print(f"  casStudy.py will use it too -- the whole Indian book, which is what\n"
+              f"  its control arm needs.")
     print(f"  Delete it, or run with --no-universe-file, to query kdb again.\n")
     return 0
 
