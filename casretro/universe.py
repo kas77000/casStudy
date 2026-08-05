@@ -4,12 +4,12 @@ Same shape as `temp.q`:
 
     select sym from equity
     where date = <last business day>,
-          (sym like "*.IN") | (sym like "*.IS") | (sym like "*.IB"),
+          (sym like "*.IN"),
           ID_ISIN in `INE180A01020`INE935A01035`...
 
 The ISIN whitelist lives in `config/cas_isins.txt` so the exchange list can be
 refreshed without touching code.  `--no-isin-filter` falls back to every
-.IN/.IS/.IB listing, which is the whole Indian book rather than the CAS subset --
+.IN listing, which is the whole Indian book rather than the CAS subset --
 useful to sanity-check that the whitelist is not silently dropping names.
 
 The reference data itself can come from either side: if
@@ -113,8 +113,8 @@ def last_business_day(conn: K.Conn) -> dt.date:
     return conn("{d:x-1; while[(d mod 7) in 0 1; d-:1]; d} .z.D").py()
 
 
-def _like_clause() -> str:
-    return " | ".join(f'(sym like "{p}")' for p in C.SYM_SUFFIXES)
+def _like_clause(suffixes: tuple[str, ...] | None = None) -> str:
+    return " | ".join(f'(sym like "{p}")' for p in (suffixes or C.SYM_SUFFIXES))
 
 
 def fetch_universe(
@@ -123,6 +123,7 @@ def fetch_universe(
     isins: list[str],
     *,
     extra_cols: bool = True,
+    suffixes: tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
     """CAS universe as a frame: sym plus the reference data the report needs.
 
@@ -144,7 +145,7 @@ def fetch_universe(
     isin_clause = ", ID_ISIN in isins" if isins else ""
     qry = K.q_lambda(
         params,
-        f"select {select} from {tbl} where {where_d}({_like_clause()}){isin_clause}",
+        f"select {select} from {tbl} where {where_d}({_like_clause(suffixes)}){isin_clause}",
     )
     args = K.date_params(inst, date) + ([K.sym_vector(isins)] if isins else [])
 

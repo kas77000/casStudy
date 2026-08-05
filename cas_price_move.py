@@ -12,7 +12,7 @@ afterwards.  Both files carry an `in_nifty50` column, so the universe file alone
 is enough to reproduce the subset.  `--scope universe|nifty` runs just one.
 
 Step 1: pull the CAS universe from the `equity` reference table (same query as
-        temp.q: last business day + .IN/.IS/.IB syms + ISIN whitelist).
+        temp.q: last business day + .IN syms + ISIN whitelist).
 Step 2: for every one of those syms, pull out of `qatt`:
           px_pre_close     -> last price strictly before CUTOFF_CONTINUOUS
           px_close         -> first price inside [CLOSE_WINDOW_START; CLOSE_WINDOW_END]
@@ -82,8 +82,10 @@ EQUITY_TABLE = "equity"        # REF/equity.csv
 #: the HT and RT *ports*, not table names -- overridable with --qatt-table.
 QATT_TABLE = "qatt"            # QATT-HT / QATT-RT
 
-# sym suffixes that identify the Indian listings in the ref table
-SYM_SUFFIXES = ("*.IN", "*.IS", "*.IB")
+# sym suffixes that identify the Indian listings in the ref table.  NSE `.IN`
+# only, matching casretro.config.SYM_SUFFIXES: the other Indian listing lines
+# lengthen the universe considerably and the auction being measured is NSE's.
+SYM_SUFFIXES = ("*.IN",)
 
 # HKT. Must keep the milliseconds -- `17:50:00` is a *second* atom in q and
 # would compare wrong against the `time` (ms) column.
@@ -609,7 +611,7 @@ def main() -> int:
     ap.add_argument("--date", help="YYYY-MM-DD; default = last business day (server side)")
     ap.add_argument("--isin-file", default=ISIN_FILE)
     ap.add_argument("--no-isin-filter", action="store_true",
-                    help="take every .IN/.IS/.IB sym instead of the CAS ISIN list")
+                    help="take every .IN sym instead of the CAS ISIN list")
     ap.add_argument("--nifty-file", default=NIFTY_FILE,
                     help="NIFTY 50 members with their kdb sym (see tools/)")
     ap.add_argument("--weights-file", default=WEIGHTS_FILE,
@@ -666,7 +668,7 @@ def main() -> int:
                 f"No ISIN found in {args.isin_file}.\n"
                 f"Paste the CAS ISIN list into that file (the raw `INE...`INE... "
                 f"form from temp.q is fine),\nor pass --no-isin-filter to run on "
-                f"every .IN/.IS/.IB sym.",
+                f"every .IN sym.",
                 file=sys.stderr,
             )
             return 2

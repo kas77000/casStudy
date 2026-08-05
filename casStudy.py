@@ -31,6 +31,7 @@ import argparse
 import datetime as dt
 import os
 import sys
+import time
 
 import numpy as np
 import pandas as pd
@@ -316,53 +317,57 @@ def resolve_universe(
 # One statement per window, joined left-folded explicitly.  Written as
 # `base lj a lj b` q reads it right to left and a sym present in b but not in a
 # loses its columns.
+#: One pass over the tape, not seven.
+#:
+#: The seven windows this study needs overlap -- 17:15-17:45 and 17:30-18:00 and
+#: 17:30-17:45 all cover the same prints -- so they cannot be bucketed the way
+#: `casretro` buckets its volume profile.  Written as seven `select`s they became
+#: seven independent scans of the partition, two of them unbounded in time, over
+#: the whole Indian book.  That is ~35 full-day scans on a normal run and it is
+#: what made this query take minutes.
+#:
+#: Instead the slice is read **once** into `t`, each row is tagged with the masks
+#: it belongs to, and every aggregate is computed from that one table.  Disk is
+#: touched once per chunk; the rest is in memory.
+#:
+#: `not null price` is the base filter, matching the old `pre` and `cls`
+#: selects.  The volume-weighted aggregates additionally need a size, so
+#: `hasSize` rides in their masks -- keeping the old per-window semantics exactly.
 _PRICES_Q = """
 {{[d;syms]
-  old: select px_old_rule_last30_continuous: size wavg price,
-              vol_last30_continuous: sum size,
-              n_trades_last30_continuous: count i
-       by sym from {tbl}
-       where date=d, sym in syms, time >= {o1}, time < {o2},
-             not null price, not null size{typ};
-  oldw: select px_old_rule_clock_1730_1800: size wavg price,
-              vol_clock_1730_1800: sum size,
-              n_trades_clock_1730_1800: count i
-       by sym from {tbl}
-       where date=d, sym in syms, time >= {w1}, time < {w2},
-             not null price, not null size{typ};
-  ref: select px_cas_reference: size wavg price,
-              vol_ref_window: sum size,
-              n_trades_ref_window: count i
-       by sym from {tbl}
-       where date=d, sym in syms, time >= {r1}, time < {r2},
-             not null price, not null size{typ};
-  pre: select px_last_continuous: last price,
-              time_last_continuous: last time,
-              n_trades_continuous: count i
-       by sym from {tbl}
-       where date=d, sym in syms, time < {c1}, not null price{typ};
-  cls: select px_auction_close: first price,
-              time_auction_print: first time,
-              vol_close_window: sum size,
-              n_trades_close_window: count i
-       by sym from {tbl}
-       where date=d, sym in syms, time within ({k1};{k2}), not null price{typ};
-  pst: select vol_after_continuous: sum size, n_trades_after_continuous: count i
-       by sym from {tbl}
-       where date=d, sym in syms, time >= {p1},
-             not null price, not null size{typ};
-  day: select vol_day: sum size, vwap_day: size wavg price
-       by sym from {tbl}
-       where date=d, sym in syms, not null price, not null size{typ};
-  r: `sym xkey ([] sym:syms);
-  r: r lj old;
-  r: r lj oldw;
-  r: r lj ref;
-  r: r lj pre;
-  r: r lj cls;
-  r: r lj pst;
-  r: r lj day;
-  0!r }}
+  t: select sym, time, price, size from {tbl}
+     where date=d, sym in syms, not null price{typ};
+  t: update hasSize: not null size from t;
+  t: update m_old : hasSize & (time >= {o1}) & time < {o2},
+            m_oldw: hasSize & (time >= {w1}) & time < {w2},
+            m_ref : hasSize & (time >= {r1}) & time < {r2},
+            m_pre : time < {c1},
+            m_cls : (time >= {k1}) & time <= {k2},
+            m_pst : hasSize & time >= {p1}
+     from t;
+  a: select
+       px_old_rule_last30_continuous: (size where m_old) wavg (price where m_old),
+       vol_last30_continuous       : sum size where m_old,
+       n_trades_last30_continuous  : sum m_old,
+       px_old_rule_clock_1730_1800 : (size where m_oldw) wavg (price where m_oldw),
+       vol_clock_1730_1800         : sum size where m_oldw,
+       n_trades_clock_1730_1800    : sum m_oldw,
+       px_cas_reference            : (size where m_ref) wavg (price where m_ref),
+       vol_ref_window              : sum size where m_ref,
+       n_trades_ref_window         : sum m_ref,
+       px_last_continuous          : last price where m_pre,
+       time_last_continuous        : last time where m_pre,
+       n_trades_continuous         : sum m_pre,
+       px_auction_close            : first price where m_cls,
+       time_auction_print          : first time where m_cls,
+       vol_close_window            : sum size where m_cls & hasSize,
+       n_trades_close_window       : sum m_cls,
+       vol_after_continuous        : sum size where m_pst,
+       n_trades_after_continuous   : sum m_pst,
+       vol_day                     : sum size where hasSize,
+       vwap_day                    : (size where hasSize) wavg (price where hasSize)
+     by sym from t;
+  0!(`sym xkey ([] sym:syms)) lj a }}
 """
 
 
@@ -397,11 +402,28 @@ PRICE_COLUMNS = (
 )
 
 
-def fetch_prices(conn, date: dt.date, syms: list[str]) -> pd.DataFrame:
+def fetch_prices(conn, date: dt.date, syms: list[str],
+                 chunk: int = SYM_CHUNK) -> pd.DataFrame:
+    """One query per chunk of syms, each a single pass over that day's tape.
+
+    Progress is printed per chunk.  This is the slow part of the run by a wide
+    margin -- it reads the whole day for the whole Indian book -- and a silent
+    wait is indistinguishable from a hang.
+    """
     qry = prices_query()
     frames = []
-    for i in range(0, len(syms), SYM_CHUNK):
-        frames.append(conn(qry, date, _sym_vector(syms[i:i + SYM_CHUNK])).pd())
+    n_chunks = (len(syms) + chunk - 1) // chunk
+    t_start = time.perf_counter()
+    for n, i in enumerate(range(0, len(syms), chunk), start=1):
+        batch = syms[i:i + chunk]
+        t0 = time.perf_counter()
+        frames.append(conn(qry, date, _sym_vector(batch)).pd())
+        done = time.perf_counter() - t_start
+        eta = done / n * (n_chunks - n)
+        print(f"[info] prices {n}/{n_chunks}  ({len(batch)} syms, "
+              f"{time.perf_counter() - t0:,.1f}s"
+              + (f", ~{eta:,.0f}s left)" if n < n_chunks else ")"),
+              flush=True)
     df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if df.empty:
         return pd.DataFrame(columns=("sym",) + PRICE_COLUMNS)

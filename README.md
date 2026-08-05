@@ -119,8 +119,8 @@ is reported rather than silently shrinking the universe.
 ```
 
 The universe query is `temp.q` verbatim: `equity`, last business day resolved
-server-side, `sym like "*.IN" | "*.IS" | "*.IB"`, `ID_ISIN in <whitelist>`.
-`--no-isin-filter` takes every `.IN/.IS/.IB` listing instead — useful to check
+server-side, `sym like "*.IN"`, `ID_ISIN in <whitelist>`.
+`--no-isin-filter` takes every `.IN` listing instead — useful to check
 whether the whitelist is dropping names it should not.
 
 ### 2.3 Optional — snapshot the reference data
@@ -138,7 +138,7 @@ python tools/export_cas_universe.py
 | file | holds | who it serves |
 |---|---|---|
 | `config/cas_universe.csv` | the CAS-eligible subset | `casretro` |
-| `config/india_universe.csv` | every `.IN/.IS/.IB` listing | `casretro` **and** `casStudy` |
+| `config/india_universe.csv` | every `.IN` listing | `casretro` **and** `casStudy` |
 
 ```bash
 python tools/export_cas_universe.py --scope cas      # just the subset

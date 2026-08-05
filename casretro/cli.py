@@ -69,7 +69,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     ap.add_argument(
         "--no-isin-filter", action="store_true",
-        help="take every .IN/.IS/.IB listing instead of the CAS ISIN whitelist",
+        help="take every .IN listing instead of the CAS ISIN whitelist",
     )
     ap.add_argument("--out", help="output directory (default: output/cas_retro_<date>_<flow>)")
     ap.add_argument(
@@ -157,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"Paste the CAS ISIN list from temp.q into that file -- the raw\n"
                 f"  `INE180A01020`INE935A01035`...\n"
                 f"backtick form is fine -- or pass --no-isin-filter to run on every\n"
-                f".IN/.IS/.IB listing instead.",
+                f".IN listing instead.",
                 file=sys.stderr,
             )
             return 2

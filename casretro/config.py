@@ -40,7 +40,7 @@ ISIN_FILE = os.path.join(CONFIG_DIR, "cas_isins.txt")
 #: Both are written by tools/export_cas_universe.py.
 #:
 #:   cas_universe.csv    the CAS-eligible subset
-#:   india_universe.csv  every .IN/.IS/.IB listing, CAS or not
+#:   india_universe.csv  every Indian listing, CAS or not
 CAS_UNIVERSE_FILE = os.path.join(CONFIG_DIR, "cas_universe.csv")
 INDIA_UNIVERSE_FILE = os.path.join(CONFIG_DIR, "india_universe.csv")
 
@@ -52,6 +52,9 @@ UNIVERSE_FILE_CANDIDATES = (CAS_UNIVERSE_FILE, INDIA_UNIVERSE_FILE)
 #: Written into every snapshot so a consumer can tell what it is holding without
 #: having to infer it from the rows.
 SCOPE_COLUMN = "universe_scope"
+#: Which sym suffixes a snapshot covers, so a short file is self-explaining
+#: rather than mistaken for a truncated one.
+SUFFIXES_COLUMN = "universe_suffixes"
 SCOPE_CAS = "CAS_ONLY"
 SCOPE_ALL = "ALL_INDIA"
 
@@ -218,7 +221,12 @@ BENCHMARK_CLSBIN_WINDOW = (REF_VWAP_START, MATCH_START)  # 17:30-18:00 HKT
 # --------------------------------------------------------------------------- #
 
 #: sym suffixes identifying the Indian listings in the `equity` ref table.
-SYM_SUFFIXES = ("*.IN", "*.IS", "*.IB")
+#: NSE `.IN` only by default.  `.IS` and `.IB` are other Indian listing lines;
+#: including them lengthens the universe considerably without adding a name the
+#: CAS work can use, since the closing auction being measured is NSE's.  Widen it
+#: here, or with `--suffixes` on tools/export_cas_universe.py, if a report needs
+#: them -- every query builds its filter from this one tuple.
+SYM_SUFFIXES = ("*.IN",)
 
 #: syms are pushed to kdb in batches of this size; ids likewise.
 SYM_CHUNK = 500

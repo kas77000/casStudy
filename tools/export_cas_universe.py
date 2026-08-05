@@ -4,7 +4,7 @@
 Two scopes, because the two consumers want different things:
 
     cas    the CAS-eligible subset          -> config/cas_universe.csv
-    all    every .IN/.IS/.IB listing        -> config/india_universe.csv
+    all    every Indian listing (.IN)       -> config/india_universe.csv
 
 `casretro` narrows whatever it reads with the CAS ISIN whitelist, so **either**
 file serves it.  `casStudy.py` splits the book into CAS and non-CAS and uses the
@@ -49,17 +49,21 @@ from casretro import universe as U  # noqa: E402
 
 SCOPES = {
     "cas": (C.SCOPE_CAS, C.CAS_UNIVERSE_FILE, "the CAS-eligible subset"),
-    "all": (C.SCOPE_ALL, C.INDIA_UNIVERSE_FILE, "every .IN/.IS/.IB listing"),
+    "all": (C.SCOPE_ALL, C.INDIA_UNIVERSE_FILE, "the whole Indian book"),
 }
 
 
-def write_snapshot(uni, date: dt.date, scope: str, path: str) -> int:
+def write_snapshot(uni, date: dt.date, scope: str, path: str,
+                   suffixes: tuple[str, ...] = ()) -> int:
     out = uni.copy()
+    # Recorded so a file that looks short can be told apart from a truncated one.
+    out.insert(0, C.SUFFIXES_COLUMN,
+               ",".join(s.replace("*", "") for s in suffixes) if suffixes else "")
     out.insert(0, C.SCOPE_COLUMN, scope)
     out.insert(0, U.SNAPSHOT_DATE_COLUMN, date.isoformat())
     # Stable column and row order, so two exports of the same day are byte
     # identical and a diff shows real changes only.
-    lead = [U.SNAPSHOT_DATE_COLUMN, C.SCOPE_COLUMN]
+    lead = [U.SNAPSHOT_DATE_COLUMN, C.SCOPE_COLUMN, C.SUFFIXES_COLUMN]
     lead += [c for c in U.EQUITY_COLUMNS if c in out.columns]
     out = out[lead + [c for c in out.columns if c not in lead]]
     out = out.sort_values("sym", ignore_index=True)
@@ -83,6 +87,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--isin-file", default=C.ISIN_FILE, help="CAS ISIN whitelist")
     ap.add_argument("--instances", default=C.INSTANCES_FILE)
     ap.add_argument("--mode", choices=("ht", "rt"), default="ht")
+    ap.add_argument("--suffixes", default=",".join(
+                        p.replace("*", "") for p in C.SYM_SUFFIXES),
+                    help="comma-separated sym suffixes to export (default: "
+                         f"{','.join(p.replace('*', '') for p in C.SYM_SUFFIXES)}). "
+                         "Pass .IN,.IS,.IB for every Indian listing line")
     ap.add_argument("--show-queries", action="store_true",
                     help="print the q queries sent (stderr)")
     ap.add_argument("--force", action="store_true",
@@ -93,6 +102,16 @@ def main(argv: list[str] | None = None) -> int:
         print("[fatal] --out names one file, but --scope both writes two. Use "
               "--out-dir, or pick a single --scope.", file=sys.stderr)
         return 2
+
+    suffixes = tuple(
+        f"*{s.strip()}" if not s.strip().startswith("*") else s.strip()
+        for s in args.suffixes.split(",") if s.strip()
+    )
+    if not suffixes:
+        print("[fatal] --suffixes is empty -- nothing would be exported",
+              file=sys.stderr)
+        return 2
+    print(f"[info] listings: {', '.join(s.replace('*', '') for s in suffixes)}")
 
     K.require_pykx()
     K.set_trace_queries(args.show_queries)
@@ -135,13 +154,13 @@ def main(argv: list[str] | None = None) -> int:
               + ("" if args.date else "   (last business day, server side)"))
         # One query for the whole book; the CAS subset is a filter on it, so the
         # two snapshots are guaranteed consistent.
-        everything = U.fetch_universe(conn, date, [])
+        everything = U.fetch_universe(conn, date, [], suffixes=suffixes)
 
     if everything.empty:
         print(
             "[fatal] the query returned nothing. Check the date is a loaded "
             "partition and\n        that some sym matches "
-            f"{C.SYM_SUFFIXES}. Re-run with --show-queries to see\n        exactly "
+            f"{suffixes}. Re-run with --show-queries to see\n        exactly "
             "what was sent.",
             file=sys.stderr,
         )
@@ -168,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     for key in wanted:
         scope_label, path = targets[key]
         frame = everything if key == "all" else everything[in_cas]
-        n = write_snapshot(frame, date, scope_label, path)
+        n = write_snapshot(frame, date, scope_label, path, suffixes)
         written.append((key, path, n))
 
     print()
