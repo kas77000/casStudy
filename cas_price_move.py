@@ -19,7 +19,18 @@ Step 2: for every one of those syms, pull out of `qatt_17034`:
           closeRefPrice -> size wavg price over [REF_WINDOW_START; REF_WINDOW_END)
           volRef        -> volume over that same reference window
           volPost       -> volume from POST_VOLUME_FROM onward
-Step 3: write a csv with the move (absolute / bps) and print a summary.
+Step 3: write a csv with the move (absolute / ticks / bps) and print a summary.
+
+The move is reported three ways.  `move` is the raw price difference, `moveTicks`
+divides it by the exchange tick applicable at that price (NSE CM bands, effective
+15 Apr 2025 -- see TICK_BANDS), and `moveBps` is the relative move.  Ticks are the
+comparable unit across names: a 5 paise move is one tick on a 300-rupee stock and
+five on a 100-rupee one.
+
+`config/nifty50_weights.csv` carries the index weight of each NIFTY 50 member.
+When it is present the weight rides along in the output and the summary adds an
+index-weighted mean move, which is what the index actually did, as opposed to the
+equal-weighted average across names.
 
 `closeRefPrice` is the exchange's CAS reference price: the 15:00-15:15 IST VWAP,
 i.e. 17:30-17:45 HKT.  Every CAS order has to sit within +/-3% (=300 bps) of it,
@@ -89,7 +100,20 @@ TYP_FILTER: tuple[str, ...] | None = None
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 ISIN_FILE = os.path.join(PROJECT_DIR, "config", "cas_isins.txt")
 NIFTY_FILE = os.path.join(PROJECT_DIR, "config", "nifty50.csv")
+WEIGHTS_FILE = os.path.join(PROJECT_DIR, "config", "nifty50_weights.csv")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output")
+
+# NSE cash-segment tick size by price band, effective 15 April 2025.  Each entry
+# is (upper bound exclusive, tick); the last band has no upper bound.  A move is
+# expressed in ticks of the band its *starting* price sits in.
+TICK_BANDS: tuple[tuple[float | None, float], ...] = (
+    (250.0, 0.01),
+    (1_000.0, 0.05),
+    (5_000.0, 0.10),
+    (10_000.0, 0.50),
+    (20_000.0, 1.00),
+    (None, 5.00),
+)
 
 # syms are sent to kdb in batches of this size
 SYM_CHUNK = 500
@@ -217,6 +241,91 @@ def load_nifty50(path: str, *, required: bool = True) -> pd.DataFrame | None:
 
 
 # --------------------------------------------------------------------------- #
+# Tick size                                                                    #
+# --------------------------------------------------------------------------- #
+
+def tick_size(price) -> float | None:
+    """Exchange tick applicable at `price`, or None when there is no price.
+
+    NSE quotes in bands, so the same 5 paise is one tick on a 300-rupee stock and
+    five on a 100-rupee one -- which is exactly why a move in ticks compares
+    across names and a move in rupees does not.
+    """
+    if price is None or pd.isna(price) or price <= 0:
+        return None
+    for upper, tick in TICK_BANDS:
+        if upper is None or price < upper:
+            return tick
+    return TICK_BANDS[-1][1]
+
+
+# --------------------------------------------------------------------------- #
+# NIFTY 50 index weights                                                       #
+# --------------------------------------------------------------------------- #
+
+WEIGHT_KEYS = (("isin", "isin"), ("nse_symbol", "nse_symbol"))
+
+
+def load_weights(path: str) -> pd.DataFrame | None:
+    """Read config/nifty50_weights.csv -- one row per index member.
+
+    Columns: nse_symbol, isin, name, weight_pct, asof, source.  A member whose
+    weight the source did not publish keeps an empty `weight_pct` rather than a
+    guessed one, so a gap stays visible in the coverage line instead of quietly
+    redistributing itself over the other names.
+    """
+    if not os.path.exists(path):
+        return None
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    if "weight_pct" not in df.columns:
+        print(f"[warn] {path} has no weight_pct column -- ignoring it", file=sys.stderr)
+        return None
+    df["weight_pct"] = pd.to_numeric(df["weight_pct"], errors="coerce")
+    for col in ("isin", "nse_symbol", "name", "asof", "source"):
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].astype(str).str.strip()
+    return df
+
+
+def attach_weights(
+    nifty: pd.DataFrame, weights: pd.DataFrame | None, *, verbose: bool = True
+) -> pd.DataFrame:
+    """Add `weight_pct` to the NIFTY member frame, matching on ISIN then symbol.
+
+    Two keys because the two files come from different places: the members file
+    is built from NSE (ISIN) or Bloomberg (ticker), the weights file carries both.
+    """
+    out = nifty.copy()
+    if weights is None or weights.empty:
+        out["weight_pct"] = pd.NA
+        return out
+
+    matched = pd.Series(float("nan"), index=out.index, dtype="float64")
+    for left, right in WEIGHT_KEYS:
+        if left not in out.columns or right not in weights.columns:
+            continue
+        lookup = dict(zip(weights[right].str.upper(), weights["weight_pct"]))
+        cand = out[left].astype(str).str.strip().str.upper().map(lookup)
+        matched = matched.where(matched.notna(), cand)
+    out["weight_pct"] = matched
+
+    if verbose:
+        n_hit = int(matched.notna().sum())
+        covered = float(matched.sum(skipna=True))
+        print(f"[info] index weights: {n_hit} of {len(out)} members matched, "
+              f"{covered:.2f}% of index weight covered "
+              f"(source {weights['source'].replace('', pd.NA).dropna().iloc[0] if len(weights) else '?'}, "
+              f"as of {weights['asof'].replace('', pd.NA).dropna().max() or '?'})")
+        gaps = weights[weights["weight_pct"].isna()]
+        if not gaps.empty:
+            print(f"[warn] {len(gaps)} member(s) have no published weight and are "
+                  f"excluded from the weighted mean: "
+                  f"{', '.join(gaps['nse_symbol'].head(10))}", file=sys.stderr)
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # kdb+                                                                         #
 # --------------------------------------------------------------------------- #
 
@@ -334,6 +443,11 @@ def build_report(
         df[col] = df[col].fillna(0.0)
 
     df["move"] = df["pxClose"] - df["pxPre"]
+    # Ticks are taken off the price the move starts from, so a name that crosses
+    # a band boundary during the move is still measured in the tick it was
+    # trading in.  pxClose stands in when there is no pre price.
+    df["tickSize"] = df["pxPre"].where(df["pxPre"].notna(), df["pxClose"]).map(tick_size)
+    df["moveTicks"] = (df["move"] / df["tickSize"]).round(2)
     df["moveBps"] = (df["pxClose"] / df["pxPre"] - 1.0) * 10_000.0
     # How far the close print sits from the CAS reference price.  The exchange
     # band is +/-3%, i.e. +/-300 bps, so this is directly comparable to it.
@@ -349,30 +463,33 @@ def build_report(
         for nb, na in zip(df["nPre"] > 0, df["nClose"] > 0)
     ]
 
-    # Index weights are deliberately not carried into the result: NSE only
-    # publishes them in a PDF, and everything derivable from the data we have is
-    # full market cap rather than free float, so the column would have been an
-    # approximation dressed up as a fact.  The NIFTY 50 file still carries
-    # `weight_pct` if its source supplied one -- nothing here reads it.
+    # `weight_pct` is the published index weight, carried in from
+    # config/nifty50_weights.csv by `attach_weights`.  It is not derived here:
+    # anything computable from the reference data we hold is full market cap
+    # rather than free float, which would be an approximation dressed up as a
+    # fact.  Empty for non-members, and for a member whose weight the source did
+    # not publish.
     if nifty is not None and not nifty.empty:
-        cols = [c for c in ("sym", "bbg_ticker", "name") if c in nifty.columns]
+        cols = [c for c in ("sym", "bbg_ticker", "name", "weight_pct")
+                if c in nifty.columns]
         df = df.merge(nifty[cols], on="sym", how="left")
         # Carried in both studies, so the whole-universe file is self-sufficient:
         # you can pull the subset out of it without needing the other file.
         df["in_nifty50"] = df["sym"].isin(set(nifty["sym"]))
     else:
         df["in_nifty50"] = pd.NA
-    for col in ("bbg_ticker", "name"):
+    for col in ("bbg_ticker", "name", "weight_pct"):
         if col not in df.columns:
             df[col] = pd.NA
 
     return df[[
-        "date", "sym", "bbg_ticker", "name", "in_nifty50", "status", "direction",
+        "date", "sym", "bbg_ticker", "name", "in_nifty50", "weight_pct",
+        "status", "direction",
         "pxPre", "tPre", "nPre",
         "pxClose", "tClose", "nClose",
         "closeRefPrice", "volRef", "nRef",
         "volPost", "vwapPost", "nPost",
-        "move", "moveBps", "closeVsRefBps",
+        "move", "tickSize", "moveTicks", "moveBps", "closeVsRefBps",
     ]].sort_values("sym", ignore_index=True)
 
 
@@ -414,11 +531,21 @@ def print_summary(rep: pd.DataFrame, date: dt.date, label: str = "") -> None:
         return
 
     bps = ok["moveBps"]
+    ticks = pd.to_numeric(ok.get("moveTicks"), errors="coerce")
     print()
-    print(f"  mean move            : {bps.mean():+.2f} bps")
-    print(f"  median move          : {bps.median():+.2f} bps")
-    print(f"  mean |move|          : {bps.abs().mean():.2f} bps")
+    print(f"  mean move            : {bps.mean():+.2f} bps   ({ticks.mean():+.2f} ticks)")
+    print(f"  median move          : {bps.median():+.2f} bps   ({ticks.median():+.2f} ticks)")
+    print(f"  mean |move|          : {bps.abs().mean():.2f} bps   ({ticks.abs().mean():.2f} ticks)")
     print(f"  up / down / flat     : {(bps > 0).sum()} / {(bps < 0).sum()} / {(bps == 0).sum()}")
+
+    # What the index did, as opposed to what the average name did.
+    w = pd.to_numeric(ok.get("weight_pct"), errors="coerce")
+    if w is not None and w.notna().any():
+        m = w.notna() & bps.notna()
+        wsum = w[m].sum()
+        if wsum:
+            print(f"  index-weighted move  : {(bps[m] * w[m]).sum() / wsum:+.2f} bps "
+                  f"over {int(m.sum())} weighted names ({wsum:.2f}% of index weight)")
 
     ref_bps = pd.to_numeric(ok.get("closeVsRefBps"), errors="coerce")
     if ref_bps is not None and ref_bps.notna().any():
@@ -429,10 +556,11 @@ def print_summary(rep: pd.DataFrame, date: dt.date, label: str = "") -> None:
 
     top = ok.reindex(bps.abs().sort_values(ascending=False).index).head(10)
     print("\n  10 largest moves")
-    print(f"    {'sym':<18}{'pxPre':>12}{'pxClose':>12}{'refPx':>12}{'bps':>10}")
+    print(f"    {'sym':<18}{'pxPre':>12}{'pxClose':>12}{'refPx':>12}{'ticks':>9}{'bps':>10}")
     for r in top.itertuples():
         ref = f"{r.closeRefPrice:>12.4f}" if pd.notna(r.closeRefPrice) else f"{'-':>12}"
-        print(f"    {r.sym:<18}{r.pxPre:>12.4f}{r.pxClose:>12.4f}{ref}{r.moveBps:>+10.1f}")
+        tks = f"{r.moveTicks:>+9.1f}" if pd.notna(r.moveTicks) else f"{'-':>9}"
+        print(f"    {r.sym:<18}{r.pxPre:>12.4f}{r.pxClose:>12.4f}{ref}{tks}{r.moveBps:>+10.1f}")
 
 
 def print_comparison(studies: list[tuple[str, str, pd.DataFrame]]) -> None:
@@ -465,6 +593,9 @@ def main() -> int:
                     help="take every .IN/.IS/.IB sym instead of the CAS ISIN list")
     ap.add_argument("--nifty-file", default=NIFTY_FILE,
                     help="NIFTY 50 members with their kdb sym (see tools/)")
+    ap.add_argument("--weights-file", default=WEIGHTS_FILE,
+                    help="NIFTY 50 index weights (nse_symbol, isin, weight_pct); "
+                         "absent means the study runs without a weighted mean")
     ap.add_argument("--scope", choices=("both", "universe", "nifty"), default="both",
                     help="which studies to produce (default: both)")
     ap.add_argument("--out-dir", default=OUTPUT_DIR,
@@ -492,6 +623,11 @@ def main() -> int:
         if nifty is not None:
             print(f"[info] {len(nifty)} NIFTY 50 members with a sym loaded from "
                   f"{os.path.basename(args.nifty_file)}")
+            weights = load_weights(args.weights_file)
+            if weights is None:
+                print(f"[warn] {args.weights_file} not found -- no index weights, "
+                      f"so no weighted mean move", file=sys.stderr)
+            nifty = attach_weights(nifty, weights)
     if args.scope == "nifty" and nifty is None:
         return 2
 
