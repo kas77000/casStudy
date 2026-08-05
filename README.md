@@ -8,6 +8,9 @@ our volume sat against the desk's benchmark closing-bin shares.
 Reads the algo kdb+ stack through **pykx**. All times are **HKT** (IST = HKT − 02:30),
 matching the raw `time` columns of the tables.
 
+> **In a hurry?** [`docs/runbook.md`](docs/runbook.md) is the run order —
+> what to launch, on which machine, and what repeats daily.
+
 ---
 
 ## 1. Install
@@ -394,6 +397,7 @@ config/
   cas_isins.txt  the CAS ISIN whitelist
   nifty50.csv    NIFTY 50 members, weights and syms (generated, gitignored)
 docs/
+  runbook.md     what to run, in what order, on which machine
   queries.md     the generated query reference
 cas_price_move.py  standalone: price move between end of continuous and the close
 ```

@@ -1,0 +1,193 @@
+# Runbook — what to run, in what order
+
+Two reports come out of this repo and they are **independent**. Only the
+price-move report needs the NIFTY 50 file.
+
+```
+  SETUP (once)
+    config/instances.json ── host/port per kdb instance
+    config/cas_isins.txt  ── the CAS ISIN whitelist
+    python -m casretro --check-config
+         │
+         ├──────────────────────────────┐
+         │                              │
+    PATH A                          PATH B
+    retrospective                   price move
+         │                              │
+         │                         build the NIFTY 50 file
+         │                          ├─ Route A: nifty50_from_nse.py   (no Bloomberg)
+         │                          └─ Route B: bloomberg_check.py
+         │                                     bloomberg_nifty50.py   (Bloomberg box)
+         │                                     → copy the file across
+         │                                     map_nifty50_syms.py    (kdb box)
+         │                              │
+    python -m casretro            python cas_price_move.py
+         │                              │
+    output/cas_retro_<date>_<flow>/   output/cas_price_move_nifty50_<date>.csv
+```
+
+---
+
+## 0. Setup — once
+
+### 0.1 Connection details
+
+Fill in `host` and `port` for each role in `config/instances.json`. No
+username/password is sent.
+
+| role | tables |
+|---|---|
+| `oms` | `target`, `target_state`, `workorder`, `execution`, `alerts` |
+| `qatt` | `qatt_17034` (HT) / `qatt_17031` (RT) |
+| `ref` | `equity`, `fx_last` |
+
+### 0.2 CAS universe
+
+Paste the ISIN whitelist from `temp.q` into `config/cas_isins.txt`. The raw
+backtick form is fine — every 12-character ISIN token is picked up, duplicates
+dropped, check digits validated.
+
+### 0.3 Verify
+
+```bash
+python -m casretro --check-config
+python -m casretro --check-config --mode rt     # if you will use the RT tapes
+```
+
+Connects to every configured instance and reports what is reachable and which
+tables are missing. **Do not skip this** — every later step assumes it passed.
+
+### 0.4 Optional — see the shape without a database
+
+```bash
+python tools/selftest.py
+```
+
+Runs the whole analytical layer on synthetic frames. No kdb, no pykx connection.
+
+---
+
+## Path A — the retrospective report
+
+Needs §0.1 and §0.2. **Nothing else. No NIFTY file.**
+
+```bash
+python -m casretro                                    # yesterday, both flows
+python -m casretro --date 2026-08-04 --flow silk
+python -m casretro --mode rt --flow both              # intraday, RT tapes
+python -m casretro --no-market-data --formats csv     # skip the qatt queries
+```
+
+Output: `output/cas_retro_<date>_<flow>/` — CSVs, an `.xlsx`, and a
+self-contained HTML page.
+
+**Read `reconciliation` first.** Any row that is not `OK` means a number
+elsewhere in the report is suspect, and it says which.
+
+---
+
+## Path B — the price-move report
+
+### Step 1 — build the NIFTY 50 file
+
+Pick one route. Both write the same columns, so everything after is identical.
+
+#### Route A — NSE's public list (no Bloomberg)
+
+Runs anywhere with internet; can run on the kdb box directly.
+
+```bash
+python tools/nifty50_from_nse.py --out config/nifty50.csv --expect 50 --resolve-syms
+```
+
+`--resolve-syms` chains step 2 in, so this single command covers steps 1 and 2.
+
+No internet on that machine? Download the list anywhere and feed it in — this
+mode never touches the network:
+
+```bash
+# on any machine:
+#   https://archives.nseindia.com/content/indices/ind_nifty50list.csv
+python tools/nifty50_from_nse.py --file ind_nifty50list.csv --resolve-syms
+```
+
+#### Route B — Bloomberg
+
+**On the Bloomberg machine** (copy `bloomberg_nifty50.py` and
+`bloomberg_check.py` across; they need nothing else from this repo):
+
+```bash
+python tools/bloomberg_check.py                   # 8 stages, exit 0 if all pass
+python tools/bloomberg_nifty50.py --out config/nifty50.csv
+```
+
+Run the check first. It walks the same path one stage at a time, so a failure
+names the broken thing instead of just saying Bloomberg could not be reached.
+
+Then **copy `config/nifty50.csv` to the kdb machine** and do step 2.
+
+### Step 2 — resolve the syms
+
+On the **kdb machine**. Skip if you used `--resolve-syms`.
+
+```bash
+python tools/map_nifty50_syms.py --file config/nifty50.csv
+```
+
+Matches `equity.ID_ISIN` against the member's ISIN, and nothing else. Anything
+unmatched is reported with the reason:
+
+| `sym_match_rule` | what to do |
+|---|---|
+| `isin` | matched, nothing to do |
+| `no_isin` | the source gave no ISIN — re-run step 1, or fill the `isin` column by hand |
+| `isin_not_in_equity` | check the snapshot date, or whether the name sits under another listing |
+
+### Step 3 — run the report
+
+```bash
+python cas_price_move.py --host <host> --port <port>
+python cas_price_move.py --no-nifty-filter          # whole CAS universe instead
+python cas_price_move.py --print-query              # the q text, no connection
+```
+
+Output: `output/cas_price_move_nifty50_<date>.csv`.
+
+> **Heads-up.** `cas_price_move.py` predates the rest and takes its own
+> `--host` / `--port` (default `localhost:5000`), opening **one** connection for
+> **both** `equity` (REF) and `qatt_17034` (QATT-HT). Every other script reads
+> `config/instances.json` and connects to each instance separately. So this step
+> only works as written if a single kdb process serves both tables. If REF and
+> QATT-HT are separate processes, it will fail on whichever table is not there.
+
+---
+
+## Day to day
+
+Only the final step of each path repeats:
+
+```bash
+python -m casretro                    # Path A
+python cas_price_move.py              # Path B
+```
+
+The NIFTY 50 file is static between index rebalances — NSE reviews
+semi-annually, in March and September. Re-run Path B step 1 then, or whenever a
+constituent changes.
+
+---
+
+## When something breaks
+
+| symptom | first thing to run |
+|---|---|
+| any kdb connection problem | `python -m casretro --check-config` |
+| Bloomberg says a package is missing | `python tools/bloomberg_nifty50.py --diagnose` |
+| a Bloomberg pull fails | `python tools/bloomberg_check.py` — it names the failing stage |
+| a number looks wrong | the `reconciliation` sheet of the retrospective |
+| you want to audit a query | `python tools/dump_queries.py --out docs/queries.md` |
+| the price-move query specifically | `python cas_price_move.py --print-query` |
+| you changed classification rules | `python tools/selftest.py` |
+
+`--traceback` on `bloomberg_nifty50.py` prints the full stack instead of the
+summary.
