@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fill in the kdb `sym` for every Bloomberg code in the NIFTY 50 file.
+"""Fill in the kdb `sym` for every NIFTY 50 member, matching on ISIN.
 
 **Runs on the kdb machine**, as the second half of the hand-off from
 `tools/bloomberg_nifty50.py`.  It reads that script's CSV, resolves each member
@@ -10,17 +10,16 @@ columns back into the same file.
     python tools/map_nifty50_syms.py --file config/nifty50.csv --date 2026-08-04
     python tools/map_nifty50_syms.py --equity-csv dump/equity.csv   # no kdb needed
 
-Matching is a waterfall, most reliable first, and the rule that won is recorded
-per row so a doubtful mapping is visible rather than buried:
+**ISIN is the only key.**  `equity.ID_ISIN` == the member's Bloomberg `ID_ISIN`,
+and nothing else.  Ticker strings drift between vendors and exchanges -- a
+`TICKER` or `sym_blp` fallback would quietly map the wrong instrument on the day
+one of them changes, and a wrong sym is far more expensive than a missing one.
+A member without an ISIN, or whose ISIN is absent from `equity`, is reported and
+left blank for a manual fix.
 
-    1. ISIN            ID_ISIN == isin
-    2. BBG code        sym_blp / sym_blp_prm / sym_bpipe == the member ticker
-    3. ticker + exch   TICKER == ticker and COMPOSITE_EXCH_CODE == exchange code
-    4. ticker only     TICKER == ticker, and only if it resolves to one listing
-
-A member that matches several listings (a dual .IN/.IB line, say) is resolved by
-the suffix preference in `SYM_PREFERENCE`; every candidate is still written to
-`sym_candidates`, so nothing is silently dropped.
+One ISIN can still legitimately hit several listings -- a dual `.IN`/`.IB` line
+is the same security twice.  That is resolved by `SYM_PREFERENCE`, and every
+candidate is written to `sym_candidates` so the choice stays visible.
 """
 
 from __future__ import annotations
@@ -37,38 +36,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from casretro import config as C  # noqa: E402
 from casretro import kdbio as K  # noqa: E402
 
-#: When one Bloomberg code maps to several listings, keep this one.
+#: When one ISIN maps to several listings, keep this one.
 #: `.IN` first because the NIFTY 50 is an NSE index.
 SYM_PREFERENCE = ("IN", "IS", "IB")
 
-#: Columns pulled from `equity` for the mapping.
+#: Columns pulled from `equity`.  Only `sym` and `ID_ISIN` drive the match; the
+#: rest ride along so the report can say *what* an ISIN resolved to.
 EQUITY_MAP_COLS = [
     "sym", "ID_ISIN", "TICKER", "COMPOSITE_EXCH_CODE", "EQY_PRIM_EXCH_SHRT",
-    "sym_blp", "sym_blp_prm", "sym_bpipe", "sym_wombat", "NAME", "CRNCY",
+    "NAME", "CRNCY",
 ]
 
-#: `equity` columns that hold a Bloomberg-style code.
-BBG_COLS = ("sym_blp", "sym_blp_prm", "sym_bpipe")
-
-_YELLOW_KEYS = {"equity", "index", "curncy", "comdty", "corp", "govt", "mtge", "pfd"}
+MATCH_RULE = "isin"
 
 
 # --------------------------------------------------------------------------- #
 # Normalisation                                                                #
 # --------------------------------------------------------------------------- #
 
-def norm_bbg(v) -> str:
-    """`RELIANCE IN Equity` / `reliance  in` -> `RELIANCE IN`."""
-    s = str(v or "").strip()
-    if not s:
-        return ""
-    parts = s.split()
-    if parts and parts[-1].lower() in _YELLOW_KEYS:
-        parts = parts[:-1]
-    return " ".join(p.upper() for p in parts)
-
-
-def norm_plain(v) -> str:
+def norm_isin(v) -> str:
     return str(v or "").strip().upper()
 
 
@@ -101,19 +87,18 @@ def load_equity_from_kdb(date: dt.date | None, instances_file: str) -> pd.DataFr
 
         tbl = inst.table("equity")
         have = set(conn.columns_of(tbl))
+        for required in ("sym", "ID_ISIN"):
+            if required not in have:
+                raise SystemExit(f"[fatal] {tbl} has no `{required}` column -- "
+                                 f"ISIN matching is not possible")
         cols = [c for c in EQUITY_MAP_COLS if c in have]
-        if "sym" not in cols:
-            raise SystemExit(f"[fatal] {tbl} has no `sym` column")
-        missing = [c for c in EQUITY_MAP_COLS if c not in have]
-        if missing:
-            print(f"[warn] {tbl} has no {', '.join(missing)} -- those match rules "
-                  f"will be skipped", file=sys.stderr)
 
         like = " | ".join(f'(sym like "{p}")' for p in C.SYM_SUFFIXES)
         where_d = K.where_date(inst)
         qry = K.q_lambda(
             ["d"] if inst.partitioned else [],
-            f"select {', '.join(cols)} from {tbl} where {where_d}({like})",
+            f"select {', '.join(cols)} from {tbl} "
+            f"where {where_d}({like}), not null ID_ISIN",
         )
         return conn.query_pd(qry, *K.date_params(inst, date))
 
@@ -128,8 +113,9 @@ def load_equity_from_csv(path: str) -> pd.DataFrame:
             f"{', '.join(EQUITY_MAP_COLS)} from equity where date=last date\n"
             f"        or drop --equity-csv and let the script query kdb directly."
         )
-    if "sym" not in df.columns:
-        raise SystemExit(f"[fatal] {path} has no `sym` column")
+    for required in ("sym", "ID_ISIN"):
+        if required not in df.columns:
+            raise SystemExit(f"[fatal] {path} has no `{required}` column")
     return df
 
 
@@ -137,65 +123,26 @@ def load_equity_from_csv(path: str) -> pd.DataFrame:
 # Matching                                                                     #
 # --------------------------------------------------------------------------- #
 
-def build_indexes(eq: pd.DataFrame) -> dict[str, dict[str, list[str]]]:
-    """Lookup tables keyed by ISIN, Bloomberg code, ticker+exch and ticker."""
-    idx: dict[str, dict[str, list[str]]] = {
-        "isin": {}, "bbg": {}, "ticker_exch": {}, "ticker": {}
-    }
-
-    def add(bucket: str, key: str, sym: str) -> None:
-        if key:
-            idx[bucket].setdefault(key, []).append(sym)
-
+def build_isin_index(eq: pd.DataFrame) -> dict[str, list[str]]:
+    """ISIN -> every sym carrying it (a dual listing gives more than one)."""
+    idx: dict[str, list[str]] = {}
     for r in eq.to_dict("records"):
         sym = str(r.get("sym", "")).strip()
-        if not sym:
-            continue
-        add("isin", norm_plain(r.get("ID_ISIN")), sym)
-        for col in BBG_COLS:
-            add("bbg", norm_bbg(r.get(col)), sym)
-        ticker = norm_plain(r.get("TICKER"))
-        exch = norm_plain(r.get("COMPOSITE_EXCH_CODE"))
-        add("ticker_exch", f"{ticker} {exch}".strip(), sym)
-        add("ticker", ticker, sym)
+        isin = norm_isin(r.get("ID_ISIN"))
+        if sym and isin:
+            idx.setdefault(isin, []).append(sym)
     return idx
 
 
-def match_row(row: dict, idx: dict) -> tuple[str, str, list[str]]:
-    """-> (sym, rule, all candidates).  Empty sym means no rule fired."""
-    isin = norm_plain(row.get("isin"))
-    if isin:
-        hits = idx["isin"].get(isin, [])
-        if hits:
-            return pick(hits), "isin", hits
-
-    member = norm_bbg(row.get("bbg_member") or row.get("bbg_ticker"))
-    if member:
-        hits = idx["bbg"].get(member, [])
-        if hits:
-            return pick(hits), "bbg_code", hits
-
-    ticker = norm_plain(row.get("ticker"))
-    if not ticker and member:
-        ticker = member.split()[0]
-    exch = norm_plain(row.get("composite_exch_code"))
-    if not exch and member and len(member.split()) > 1:
-        exch = member.split()[1]
-
-    if ticker and exch:
-        hits = idx["ticker_exch"].get(f"{ticker} {exch}", [])
-        if hits:
-            return pick(hits), "ticker_exch", hits
-
-    if ticker:
-        hits = idx["ticker"].get(ticker, [])
-        if len(set(hits)) == 1:
-            return hits[0], "ticker", hits
-        if hits:
-            # ambiguous: report every candidate but do not guess
-            return "", "ticker_ambiguous", hits
-
-    return "", "", []
+def match_row(row: dict, idx: dict[str, list[str]]) -> tuple[str, str, list[str]]:
+    """-> (sym, rule, candidates).  Empty sym means no ISIN hit."""
+    isin = norm_isin(row.get("isin"))
+    if not isin:
+        return "", "no_isin", []
+    hits = idx.get(isin, [])
+    if not hits:
+        return "", "isin_not_in_equity", []
+    return pick(hits), MATCH_RULE, hits
 
 
 # --------------------------------------------------------------------------- #
@@ -225,6 +172,11 @@ def main(argv: list[str] | None = None) -> int:
     if nifty.empty:
         print(f"[fatal] {args.file} is empty", file=sys.stderr)
         return 2
+    if "isin" not in nifty.columns:
+        print(f"[fatal] {args.file} has no `isin` column -- ISIN is the only match "
+              f"key, so re-run tools/bloomberg_nifty50.py to produce it",
+              file=sys.stderr)
+        return 2
     print(f"[info] {len(nifty)} members read from {args.file}")
 
     if args.equity_csv:
@@ -233,13 +185,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         date = dt.date.fromisoformat(args.date) if args.date else None
         eq = load_equity_from_kdb(date, args.instances)
-        print(f"[info] {len(eq)} Indian listings from the equity table")
+        print(f"[info] {len(eq)} Indian listings with an ISIN from the equity table")
 
     if eq.empty:
         print("[fatal] the equity reference came back empty", file=sys.stderr)
         return 1
 
-    idx = build_indexes(eq)
+    idx = build_isin_index(eq)
 
     syms, rules, cands = [], [], []
     for row in nifty.to_dict("records"):
@@ -258,38 +210,44 @@ def main(argv: list[str] | None = None) -> int:
 
     # -- report ------------------------------------------------------------- #
     matched = nifty[nifty["sym"] != ""]
-    unmatched = nifty[nifty["sym"] == ""]
+    no_isin = nifty[nifty["sym_match_rule"] == "no_isin"]
+    not_in_eq = nifty[nifty["sym_match_rule"] == "isin_not_in_equity"]
 
-    print(f"\n  matched : {len(matched)} / {len(nifty)}")
-    for rule, n in matched["sym_match_rule"].value_counts().items():
-        print(f"    by {rule:<14} {n}")
+    print(f"\n  matched on ISIN : {len(matched)} / {len(nifty)}")
 
-    multi = nifty[nifty["sym_candidates"] != ""]
-    resolved_multi = multi[multi["sym"] != ""]
-    if not resolved_multi.empty:
-        print(f"\n  {len(resolved_multi)} member(s) matched several listings, resolved "
-              f"by the {'/'.join(SYM_PREFERENCE)} preference:")
-        for r in resolved_multi.to_dict("records")[:20]:
-            print(f"    {r['bbg_member']:<22} -> {r['sym']:<16} from {r['sym_candidates']}")
+    dual = matched[matched["sym_candidates"] != ""]
+    if not dual.empty:
+        print(f"\n  {len(dual)} ISIN(s) carried by more than one listing, resolved by "
+              f"the {'/'.join(SYM_PREFERENCE)} preference:")
+        for r in dual.to_dict("records")[:20]:
+            print(f"    {r['bbg_member']:<22} {r['isin']:<14} -> {r['sym']:<16} "
+                  f"from {r['sym_candidates']}")
 
-    if not unmatched.empty:
+    if not no_isin.empty or not not_in_eq.empty:
         sys.stdout.flush()
-        print(f"\n  UNMATCHED: {len(unmatched)}", file=sys.stderr)
-        for r in unmatched.to_dict("records"):
-            if r["sym_match_rule"] == "ticker_ambiguous":
-                why = f"ticker matches {r['sym_candidates']} -- pick one by hand"
-            else:
-                why = "no ISIN, Bloomberg code or ticker hit"
-            print(f"    {r['bbg_member']:<22} isin={r['isin'] or '-':<14} {why}",
+        print(f"\n  UNMATCHED: {len(no_isin) + len(not_in_eq)}", file=sys.stderr)
+
+        if not no_isin.empty:
+            print(f"\n  {len(no_isin)} member(s) came back from Bloomberg without an "
+                  f"ISIN -- re-run tools/bloomberg_nifty50.py, or add the ISIN by hand:",
                   file=sys.stderr)
-        print("\n  Fix by hand in the csv, or check that the equity snapshot date "
-              "covers these names.", file=sys.stderr)
+            for r in no_isin.to_dict("records"):
+                print(f"    {r['bbg_member']:<22} {r.get('name', '')}", file=sys.stderr)
+
+        if not not_in_eq.empty:
+            print(f"\n  {len(not_in_eq)} ISIN(s) are not in the equity table for this "
+                  f"date -- check the snapshot date, or whether the name is carried "
+                  f"under a different listing:", file=sys.stderr)
+            for r in not_in_eq.to_dict("records"):
+                print(f"    {r['bbg_member']:<22} {r['isin']:<14} {r.get('name', '')}",
+                      file=sys.stderr)
 
     weight_covered = pd.to_numeric(matched.get("weight_pct"), errors="coerce").fillna(0).sum()
     print(f"\n  index weight covered: {weight_covered:.2f}%")
     print(f"  written -> {out}\n")
 
-    return 1 if (args.fail_on_unmatched and not unmatched.empty) else 0
+    unmatched = len(no_isin) + len(not_in_eq)
+    return 1 if (args.fail_on_unmatched and unmatched) else 0
 
 
 if __name__ == "__main__":

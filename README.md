@@ -418,23 +418,28 @@ python tools/map_nifty50_syms.py --equity-csv dump/equity.csv   # no kdb needed
 python tools/map_nifty50_syms.py --fail-on-unmatched    # for a scheduled run
 ```
 
-It fills in `sym` and `sym_match_rule` using a waterfall, most reliable first:
+It fills in `sym` and `sym_match_rule` by matching **ISIN and nothing else**:
+`equity.ID_ISIN` == the member's Bloomberg `ID_ISIN`. Ticker strings drift
+between vendors and exchanges, so a `TICKER` or `sym_blp` fallback would quietly
+map the wrong instrument the day one of them changes — and a wrong sym costs far
+more than a missing one.
 
-| rule | test |
-|---|---|
-| `isin` | `equity.ID_ISIN` == the member's ISIN |
-| `bbg_code` | `sym_blp` / `sym_blp_prm` / `sym_bpipe` == the member ticker |
-| `ticker_exch` | `TICKER` + `COMPOSITE_EXCH_CODE` |
-| `ticker` | `TICKER` alone, **only** when it resolves to one listing |
+Everything that does not match is reported, split by what you would have to do
+about it:
 
-`bbg_code` matters more than it looks: Bloomberg calls Infosys `INFO IN` while
-the sym is `INFY.IN`, so ticker matching alone would miss it.
+| `sym_match_rule` | meaning | fix |
+|---|---|---|
+| `isin` | matched | — |
+| `no_isin` | Bloomberg returned no `ID_ISIN` for the member | re-run step 1, or fill the `isin` column by hand |
+| `isin_not_in_equity` | the ISIN is absent from `equity` on that date | check the snapshot date, or whether the name sits under another listing |
 
-A member matching several listings (a dual `.IN`/`.IB` line) is resolved by
-`SYM_PREFERENCE` — `.IN` first, since the NIFTY 50 is an NSE index — and every
-candidate is written to `sym_candidates`, so the choice is visible. A member
-whose *ticker* is ambiguous is left **unmapped** rather than guessed, and listed
-on stderr for a manual fix.
+One ISIN can legitimately hit several listings — a dual `.IN`/`.IB` line is the
+same security twice. That is resolved by `SYM_PREFERENCE` (`.IN` first, since the
+NIFTY 50 is an NSE index) and every candidate is written to `sym_candidates`, so
+the choice stays visible.
+
+Because ISIN is the only key, step 1 warns loudly if any member came back without
+one: those rows cannot be mapped at all.
 
 `config/nifty50*.csv` is gitignored: index weights are licensed Bloomberg data.
 

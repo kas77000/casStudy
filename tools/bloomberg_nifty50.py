@@ -22,8 +22,10 @@ have no history entitlement) it falls back to `INDX_MWEIGHT`, which is the
 current basket -- and says so, because a "historical" file that silently holds
 today's weights is worse than no file.
 
-For each member a second reference request picks up `ID_ISIN`, which is what
-makes the kdb-side mapping reliable: ticker strings drift, ISINs do not.
+For each member a second reference request picks up `ID_ISIN`.  That field is
+not optional: `tools/map_nifty50_syms.py` matches on ISIN and on nothing else, so
+a member that arrives without one cannot be mapped to a kdb sym at all.  The
+script counts them and says so before you carry the file to the other machine.
 """
 
 from __future__ import annotations
@@ -361,8 +363,16 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     if missing_isin:
-        print(f"[warn] {missing_isin} member(s) came back without an ISIN -- the kdb "
-              f"mapping will have to fall back to ticker matching", file=sys.stderr)
+        print(
+            f"[warn] {missing_isin} of {len(rows)} member(s) came back without an "
+            f"ID_ISIN.\n"
+            f"       ISIN is the only key map_nifty50_syms.py matches on, so those "
+            f"members\n"
+            f"       will NOT get a sym. Fill the isin column in by hand before "
+            f"copying the\n"
+            f"       file across, or re-run once the ID_ISIN entitlement is sorted.",
+            file=sys.stderr,
+        )
     if abs(total - 100.0) > 1.0:
         print(f"[warn] weights sum to {total:.2f}%, not ~100% -- check the index ticker "
               f"and the override date", file=sys.stderr)
