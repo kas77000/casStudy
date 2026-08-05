@@ -23,7 +23,8 @@ price-move report needs the NIFTY 50 file.
          │                              │
     python -m casretro            python cas_price_move.py
          │                              │
-    output/cas_retro_<date>_<flow>/   output/cas_price_move_nifty50_<date>.csv
+    output/cas_retro_<date>_<flow>/   output/cas_price_move_universe_<date>.csv
+                                     output/cas_price_move_nifty50_<date>.csv
 ```
 
 ---
@@ -147,11 +148,24 @@ unmatched is reported with the reason:
 
 ```bash
 python cas_price_move.py --host <host> --port <port>
-python cas_price_move.py --no-nifty-filter          # whole CAS universe instead
+python cas_price_move.py --scope universe           # skip the subset study
+python cas_price_move.py --scope nifty              # subset only
 python cas_price_move.py --print-query              # the q text, no connection
 ```
 
-Output: `output/cas_price_move_nifty50_<date>.csv`.
+Two studies by default, from one round of queries:
+
+```
+output/cas_price_move_universe_<date>.csv     every CAS-eligible Indian sym
+output/cas_price_move_nifty50_<date>.csv      the NIFTY 50 constituents
+```
+
+Both files carry the same columns, including `in_nifty50`, so the universe file
+alone reproduces the subset. A `side by side` block at the end compares them.
+
+Step 1 and step 2 are only needed for the **subset** study. Without
+`config/nifty50.csv` the universe study still runs, and the subset is skipped
+with a note on how to build the file.
 
 > **Heads-up.** `cas_price_move.py` predates the rest and takes its own
 > `--host` / `--port` (default `localhost:5000`), opening **one** connection for

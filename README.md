@@ -542,10 +542,28 @@ one: those rows cannot be mapped at all.
 ### 10.2 What the price-move report now carries
 
 ```bash
-python cas_price_move.py                      # NIFTY 50 subset of the CAS universe
-python cas_price_move.py --no-nifty-filter    # the whole CAS universe, as before
+python cas_price_move.py                      # both studies (default)
+python cas_price_move.py --scope universe     # whole CAS universe only
+python cas_price_move.py --scope nifty        # NIFTY 50 subset only
 python cas_price_move.py --print-query        # the q text, no connection needed
 ```
+
+**Two studies by default**, from **one** round of queries — the subset lives
+inside the universe, so the prices are pulled once and sliced afterwards:
+
+```
+output/cas_price_move_universe_<date>.csv     every CAS-eligible Indian sym
+output/cas_price_move_nifty50_<date>.csv      the NIFTY 50 constituents
+```
+
+Both carry the same columns, including `in_nifty50`, so the universe file alone
+reproduces the subset — the second file is a convenience, not the only way to get
+at it. A `side by side` block at the end of the run compares the two.
+
+If `config/nifty50.csv` is missing, the universe study still runs and the subset
+one is skipped with a note on how to build the file. Asking for `--scope nifty`
+without it is a hard error. `--out` names a single file and is therefore only
+valid with a single `--scope`; use `--out-dir` otherwise.
 
 New columns, all from one query per sym chunk:
 

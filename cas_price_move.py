@@ -2,9 +2,17 @@
 """
 India CAS -- price move between the end of continuous and the close.
 
+By default it produces **two studies from one round of queries**:
+
+    universe   every CAS-eligible Indian sym
+    nifty50    the NIFTY 50 constituents listed in config/nifty50.csv
+
+The subset lives inside the universe, so the prices are pulled once and sliced
+afterwards.  Both files carry an `in_nifty50` column, so the universe file alone
+is enough to reproduce the subset.  `--scope universe|nifty` runs just one.
+
 Step 1: pull the CAS universe from the `equity` reference table (same query as
-        temp.q: last business day + .IN/.IS/.IB syms + ISIN whitelist), then
-        narrow it to the NIFTY 50 constituents listed in config/nifty50.csv.
+        temp.q: last business day + .IN/.IS/.IB syms + ISIN whitelist).
 Step 2: for every one of those syms, pull out of `qatt_17034`:
           pxPre         -> last price strictly before CUTOFF_CONTINUOUS
           pxClose       -> first price inside [CLOSE_WINDOW_START; CLOSE_WINDOW_END]
@@ -17,10 +25,12 @@ Step 3: write a csv with the move (absolute / bps) and print a summary.
 i.e. 17:30-17:45 HKT.  Every CAS order has to sit within +/-3% (=300 bps) of it,
 so `closeVsRefBps` in the output says how close the print came to the band edge.
 
-The NIFTY 50 file is produced by two scripts, in this order:
-    tools/bloomberg_nifty50.py    on the Bloomberg machine  -> members + weights
-    tools/map_nifty50_syms.py     on the kdb machine        -> adds the `sym`
-Pass --no-nifty-filter to run on the full CAS universe instead.
+The NIFTY 50 file comes from either
+    tools/nifty50_from_nse.py --resolve-syms          (no Bloomberg needed)
+or
+    tools/bloomberg_nifty50.py  on the Bloomberg box  -> members
+    tools/map_nifty50_syms.py   on the kdb box        -> adds the `sym`
+If it is missing, the universe study still runs and the subset one is skipped.
 
 All times are HKT, i.e. the raw `time` column of the qatt table -- no timezone
 conversion is applied anywhere.  IST = HKT - 02:30.
@@ -144,24 +154,39 @@ def load_isins(path: str) -> list[str]:
 # NIFTY 50 subset                                                              #
 # --------------------------------------------------------------------------- #
 
-def load_nifty50(path: str) -> pd.DataFrame:
+_NIFTY_HOWTO = (
+    "        Build it either way:\n"
+    "          A. no Bloomberg needed:\n"
+    "             python tools/nifty50_from_nse.py --out {path} --resolve-syms\n"
+    "          B. on the Bloomberg machine:\n"
+    "             python tools/bloomberg_nifty50.py --out {path}\n"
+    "             then copy it across and, on the kdb machine:\n"
+    "             python tools/map_nifty50_syms.py --file {path}"
+)
+
+
+def load_nifty50(path: str, *, required: bool = True) -> pd.DataFrame | None:
     """Read config/nifty50.csv and return the rows that carry a resolved `sym`.
 
-    The file is the hand-off between the two helper scripts: Bloomberg supplies
-    the members and weights, the kdb side supplies `sym`.  A file with an empty
+    The file is the hand-off between the two helper scripts: one supplies the
+    members and their ISINs, the kdb side supplies `sym`.  A file with an empty
     `sym` column means the second script has not run yet, which is worth an
     explicit error -- filtering on nothing would silently produce an empty
     report.
+
+    `required=False` returns None instead of exiting when the file is absent, so
+    a default run can still produce the whole-universe study.
     """
     if not os.path.exists(path):
+        if not required:
+            print(
+                f"[warn] {path} not found -- skipping the NIFTY 50 study.\n"
+                + _NIFTY_HOWTO.format(path=path),
+                file=sys.stderr,
+            )
+            return None
         raise SystemExit(
-            f"[fatal] {path} not found.\n"
-            f"        Build it in two steps:\n"
-            f"          1. on the Bloomberg machine:\n"
-            f"             python tools/bloomberg_nifty50.py --out {path}\n"
-            f"          2. copy it across, then on the kdb machine:\n"
-            f"             python tools/map_nifty50_syms.py --file {path}\n"
-            f"        Or pass --no-nifty-filter to run on the whole CAS universe."
+            f"[fatal] {path} not found.\n" + _NIFTY_HOWTO.format(path=path)
         )
 
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
@@ -332,12 +357,17 @@ def build_report(
     if nifty is not None and not nifty.empty:
         cols = [c for c in ("sym", "bbg_ticker", "name") if c in nifty.columns]
         df = df.merge(nifty[cols], on="sym", how="left")
+        # Carried in both studies, so the whole-universe file is self-sufficient:
+        # you can pull the subset out of it without needing the other file.
+        df["in_nifty50"] = df["sym"].isin(set(nifty["sym"]))
+    else:
+        df["in_nifty50"] = pd.NA
     for col in ("bbg_ticker", "name"):
         if col not in df.columns:
             df[col] = pd.NA
 
     return df[[
-        "date", "sym", "bbg_ticker", "name", "status", "direction",
+        "date", "sym", "bbg_ticker", "name", "in_nifty50", "status", "direction",
         "pxPre", "tPre", "nPre",
         "pxClose", "tClose", "nClose",
         "closeRefPrice", "volRef", "nRef",
@@ -346,9 +376,12 @@ def build_report(
     ]].sort_values("sym", ignore_index=True)
 
 
-def print_summary(rep: pd.DataFrame, date: dt.date) -> None:
+def print_summary(rep: pd.DataFrame, date: dt.date, label: str = "") -> None:
     ok = rep[rep["status"] == "ok"]
     print()
+    print("=" * 72)
+    print(f"  {label or 'study'}")
+    print("=" * 72)
     print(f"  date                 : {date}")
     print(f"  end of continuous    : last price before  {CUTOFF_CONTINUOUS} HKT")
     print(f"  close                : first price within {CLOSE_WINDOW_START}"
@@ -402,6 +435,23 @@ def print_summary(rep: pd.DataFrame, date: dt.date) -> None:
         print(f"    {r.sym:<18}{r.pxPre:>12.4f}{r.pxClose:>12.4f}{ref}{r.moveBps:>+10.1f}")
 
 
+def print_comparison(studies: list[tuple[str, str, pd.DataFrame]]) -> None:
+    """Side by side, so the subset can be read against the whole book."""
+    print()
+    print("=" * 72)
+    print("  side by side")
+    print("=" * 72)
+    print(f"  {'study':<12}{'syms':>7}{'both px':>9}{'mean bps':>11}"
+          f"{'|mean| bps':>12}{'vol ref':>16}{'vol post':>16}")
+    for key, _label, rep in studies:
+        ok = rep[rep["status"] == "ok"]
+        bps = ok["moveBps"]
+        mean = f"{bps.mean():+.2f}" if len(bps) else "-"
+        amean = f"{bps.abs().mean():.2f}" if len(bps) else "-"
+        print(f"  {key:<12}{len(rep):>7}{len(ok):>9}{mean:>11}{amean:>12}"
+              f"{rep['volRef'].sum():>16,.0f}{rep['volPost'].sum():>16,.0f}")
+
+
 # --------------------------------------------------------------------------- #
 
 def main() -> int:
@@ -415,9 +465,11 @@ def main() -> int:
                     help="take every .IN/.IS/.IB sym instead of the CAS ISIN list")
     ap.add_argument("--nifty-file", default=NIFTY_FILE,
                     help="NIFTY 50 members with their kdb sym (see tools/)")
-    ap.add_argument("--no-nifty-filter", action="store_true",
-                    help="run on the whole CAS universe instead of the NIFTY 50 subset")
-    ap.add_argument("--out", help="output csv path")
+    ap.add_argument("--scope", choices=("both", "universe", "nifty"), default="both",
+                    help="which studies to produce (default: both)")
+    ap.add_argument("--out-dir", default=OUTPUT_DIR,
+                    help="where the csv files go (default: output/)")
+    ap.add_argument("--out", help="output csv path; only valid for a single scope")
     ap.add_argument("--print-query", action="store_true",
                     help="print the q query and exit, without connecting")
     args = ap.parse_args()
@@ -426,11 +478,22 @@ def main() -> int:
         print(prices_query())
         return 0
 
+    if args.out and args.scope == "both":
+        print("[fatal] --out names one file, but --scope both writes two. Use "
+              "--out-dir, or pick a single --scope.", file=sys.stderr)
+        return 2
+
+    # The subset lives inside the universe, so a missing NIFTY file only costs
+    # the subset study -- the universe one still runs.  Asking for it by name is
+    # a different matter and is a hard error.
     nifty: pd.DataFrame | None = None
-    if not args.no_nifty_filter:
-        nifty = load_nifty50(args.nifty_file)
-        print(f"[info] {len(nifty)} NIFTY 50 members with a sym loaded from "
-              f"{os.path.basename(args.nifty_file)}")
+    if args.scope in ("both", "nifty"):
+        nifty = load_nifty50(args.nifty_file, required=(args.scope == "nifty"))
+        if nifty is not None:
+            print(f"[info] {len(nifty)} NIFTY 50 members with a sym loaded from "
+                  f"{os.path.basename(args.nifty_file)}")
+    if args.scope == "nifty" and nifty is None:
+        return 2
 
     isins: list[str] = []
     if not args.no_isin_filter:
@@ -456,19 +519,12 @@ def main() -> int:
             print("[warn] empty universe -- check the date and the ISIN list", file=sys.stderr)
             return 1
 
-        if nifty is not None:
+        # The NIFTY 50 study is a subset of the universe, so the prices are
+        # pulled once and sliced afterwards.  Restricting the query up front
+        # would mean a second round trip for no extra information.
+        if args.scope == "nifty" and nifty is not None:
             wanted = set(nifty["sym"])
-            kept = [s for s in syms if s in wanted]
-            absent = sorted(wanted - set(syms))
-            if absent:
-                print(
-                    f"[warn] {len(absent)} NIFTY 50 sym(s) are not in the CAS "
-                    f"universe for {date} and were dropped: "
-                    f"{', '.join(absent[:10])}{' ...' if len(absent) > 10 else ''}",
-                    file=sys.stderr,
-                )
-            syms = kept
-            print(f"[info] {len(syms)} syms after the NIFTY 50 filter")
+            syms = [s for s in syms if s in wanted]
             if not syms:
                 print("[warn] no NIFTY 50 sym survived the CAS filter -- check that "
                       "the syms in the nifty file match the equity table",
@@ -477,17 +533,59 @@ def main() -> int:
 
         raw = fetch_prices(conn, date, syms)
 
-    rep = build_report(raw, date, nifty)
+    universe_syms = set(syms)
+    if nifty is not None:
+        absent = sorted(set(nifty["sym"]) - universe_syms)
+        if absent:
+            print(
+                f"[warn] {len(absent)} NIFTY 50 sym(s) are not in the CAS universe "
+                f"for {date} and are absent from the subset study: "
+                f"{', '.join(absent[:10])}{' ...' if len(absent) > 10 else ''}",
+                file=sys.stderr,
+            )
 
-    suffix = "" if nifty is None else "_nifty50"
-    out = args.out or os.path.join(
-        OUTPUT_DIR, f"cas_price_move{suffix}_{date:%Y%m%d}.csv"
-    )
-    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    rep.to_csv(out, index=False, float_format="%.6f")
+    # -- build the studies ------------------------------------------------- #
+    studies: list[tuple[str, str, pd.DataFrame]] = []   # (key, label, frame)
 
-    print_summary(rep, date)
-    print(f"\n  written -> {out}\n")
+    if args.scope in ("both", "universe"):
+        studies.append((
+            "universe",
+            f"CAS universe -- {len(universe_syms)} syms",
+            build_report(raw, date, nifty),
+        ))
+
+    if nifty is not None and args.scope in ("both", "nifty"):
+        subset = raw[raw["sym"].astype(str).isin(set(nifty["sym"]))]
+        studies.append((
+            "nifty50",
+            f"NIFTY 50 subset -- {subset['sym'].nunique()} of "
+            f"{len(nifty)} members in the CAS universe",
+            build_report(subset, date, nifty),
+        ))
+
+    if not studies:
+        print("[warn] nothing to do", file=sys.stderr)
+        return 1
+
+    # -- write ------------------------------------------------------------- #
+    written = []
+    for key, label, rep in studies:
+        if args.out and len(studies) == 1:
+            out = args.out
+        else:
+            out = os.path.join(args.out_dir, f"cas_price_move_{key}_{date:%Y%m%d}.csv")
+        os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+        rep.to_csv(out, index=False, float_format="%.6f")
+        written.append((label, out))
+        print_summary(rep, date, label)
+
+    if len(studies) > 1:
+        print_comparison(studies)
+
+    print()
+    for label, out in written:
+        print(f"  written -> {out}")
+    print()
     return 0
 
 
