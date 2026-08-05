@@ -58,9 +58,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--instances", default=C.INSTANCES_FILE, help="path to instances.json")
     ap.add_argument("--isin-file", default=C.ISIN_FILE, help="CAS ISIN whitelist")
     ap.add_argument(
-        "--universe-file", default=C.CAS_UNIVERSE_FILE,
-        help="csv snapshot of the equity reference data; used when it exists, "
-             "otherwise kdb is queried (see tools/export_cas_universe.py)",
+        "--universe-file", default=None,
+        help="csv snapshot of the equity reference data. Default: "
+             "config/cas_universe.csv, then config/india_universe.csv, then kdb "
+             "(see tools/export_cas_universe.py)",
     )
     ap.add_argument(
         "--no-universe-file", action="store_true",
@@ -186,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
             args.flow,
             isins=isins,
             skip_market_data=args.no_market_data,
-            universe_csv=args.universe_file,
+            universe_csv=args.universe_file or C.UNIVERSE_FILE_CANDIDATES,
             use_universe_csv=not args.no_universe_file,
             drop_unfilled=not args.keep_unfilled,
             require_close_wo=not args.keep_no_close,

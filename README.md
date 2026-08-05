@@ -1,15 +1,61 @@
-# CAS India — execution retrospective
+# CAS India
 
-Post-trade report on **CAS-eligible Indian stocks** traded on the platform: which
-parent orders made it into the closing auction, which ones did not and **why**,
-what got rejected — split between continuous trading and the CAS window — and how
-our volume sat against the desk's benchmark closing-bin shares.
+India moved its close to a call auction (CAS). This repo answers three separate
+questions about that, off the same kdb+ stack, through **pykx**.
 
-Reads the algo kdb+ stack through **pykx**. All times are **HKT** (IST = HKT − 02:30),
-matching the raw `time` columns of the tables.
+Everything is **HKT** — the raw `time` columns of the tables. IST = HKT − 02:30.
 
-> **In a hurry?** [`docs/runbook.md`](docs/runbook.md) is the run order —
-> what to launch, on which machine, and what repeats daily.
+---
+
+## Start here
+
+### The three reports
+
+| run | answers | read |
+|---|---|---|
+| `python -m casretro` | **Our orders.** Which parent orders made it into the auction, which did not and why, what got rejected, how our volume sat against the desk benchmarks. | §5 |
+| `python cas_price_move.py` | **The move.** How far price travelled between the end of continuous and the close, per name, with the CAS reference price and the volume either side. | §10.2 |
+| `python casStudy.py` | **The effect.** What CAS did to the NIFTY 50 versus the old closing rule, with non-CAS names as a control arm. | [`docs/cas_study_method.md`](docs/cas_study_method.md) |
+
+They are independent. Nothing forces you to run all three.
+
+### The files they read
+
+Everything lives in `config/`. Only the first two are mandatory, and only for
+`casretro`.
+
+| file | what it is | needed by | how to make it |
+|---|---|---|---|
+| `instances.json` | kdb host/port per role | all three | edit by hand — §2.1 |
+| `cas_isins.txt` | the CAS ISIN whitelist | all three | paste from `temp.q` — §2.2 |
+| `cas_universe.csv` | reference data, CAS names only | optional | `tools/export_cas_universe.py` — §2.3 |
+| `india_universe.csv` | reference data, whole Indian book | optional | same, `--scope all` — §2.3 |
+| `nifty50.csv` | NIFTY 50 members + their kdb `sym` | `cas_price_move` | `tools/nifty50_from_nse.py` — §10.1 |
+| `nifty50_weights.csv` | NIFTY 50 index weights | `casStudy` | supplied by hand |
+
+The two `*_universe.csv` files are a convenience: when present the reference data
+is read from them instead of queried. Delete them and everything still works.
+
+### Minimum to get a first report
+
+```bash
+pip install pykx pandas numpy openpyxl
+
+# 1. fill in host/port
+#    config/instances.json
+# 2. paste the ISIN whitelist from temp.q
+#    config/cas_isins.txt
+
+python -m casretro --check-config     # does it connect?
+python -m casretro                    # the retrospective
+```
+
+That is the whole dependency chain for report 1. Reports 2 and 3 need one more
+file each, built by a tool — §10.1 and `docs/cas_study_method.md`.
+
+> [`docs/runbook.md`](docs/runbook.md) has the same thing as an ordered checklist,
+> including which steps run on which machine.
+> [`docs/queries.md`](docs/queries.md) lists every q query sent.
 
 ---
 
@@ -77,51 +123,68 @@ server-side, `sym like "*.IN" | "*.IS" | "*.IB"`, `ID_ISIN in <whitelist>`.
 `--no-isin-filter` takes every `.IN/.IS/.IB` listing instead — useful to check
 whether the whitelist is dropping names it should not.
 
-### 2.3 Optional — `config/cas_universe.csv`
+### 2.3 Optional — snapshot the reference data
 
-The reference data can come from a csv instead of the `equity` table. If
-`config/cas_universe.csv` exists it is used; if not, the query runs as before.
-Nothing to switch on.
+The reference data can come from a csv instead of the `equity` table. When one
+exists it is used; when neither does, the query runs as before. Nothing to switch
+on, nothing to configure.
+
+One command writes both scopes:
 
 ```bash
-python tools/export_cas_universe.py                   # -> config/cas_universe.csv
-python tools/export_cas_universe.py --date 2026-08-04
-python tools/export_cas_universe.py --no-isin-filter  # every .IN/.IS/.IB listing
-python -m casretro --no-universe-file                 # ignore it, query kdb
+python tools/export_cas_universe.py
 ```
 
-The export runs the same query the report would have, so the two cannot drift
-apart in shape. With the snapshot in place **and** `--date` supplied, the REF
-connection is never opened at all.
+| file | holds | who it serves |
+|---|---|---|
+| `config/cas_universe.csv` | the CAS-eligible subset | `casretro` |
+| `config/india_universe.csv` | every `.IN/.IS/.IB` listing | `casretro` **and** `casStudy` |
+
+```bash
+python tools/export_cas_universe.py --scope cas      # just the subset
+python tools/export_cas_universe.py --scope all      # just the whole book
+python tools/export_cas_universe.py --date 2026-08-04 --force
+python -m casretro --no-universe-file                # ignore them, query kdb
+```
+
+The whole book is queried **once** and the CAS subset is taken from it in memory,
+so the two files cannot disagree and asking for both costs no extra round trip.
+The export calls the same `fetch_universe` the report calls, so the snapshot and
+the live path cannot drift apart in shape.
+
+**Why two scopes.** `casretro` narrows whatever it reads with the ISIN whitelist,
+so either file gives it the same answer. `casStudy` splits the book into CAS and
+non-CAS and uses the non-CAS names as its **control arm**, so a CAS-only snapshot
+leaves it with nothing to measure — it refuses to run on one and says why. Each
+file records its own scope, so the message is precise rather than inferred.
+
+Search order, when `--universe-file` is not given:
+
+```
+casretro   cas_universe.csv  ->  india_universe.csv  ->  kdb
+casStudy   india_universe.csv  ->  cas_universe.csv (refuses)  ->  kdb
+```
 
 The **ISIN whitelist is applied again at read time**, so narrowing
 `config/cas_isins.txt` takes effect immediately — only a change of reference data
-needs a re-export. That also means you can export once with `--no-isin-filter`
-and let the whitelist do the narrowing from then on.
+needs a re-export.
 
-**`casStudy.py` reads the same file**, with one extra requirement. It splits the
-universe into CAS and non-CAS and uses the non-CAS names as its control arm, so a
-CAS-only snapshot would leave S5 with nothing to measure. It refuses to run on
-one, and says so. `--no-isin-filter` produces a file that serves both scripts —
-which is why it is the recommended form:
-
-```bash
-python tools/export_cas_universe.py --no-isin-filter
-```
+With a snapshot in place **and** `--date` supplied, the REF connection is never
+opened at all.
 
 > **What ages.** `sym`, `ID_ISIN`, `TICKER`, `NAME` are static. `adv`,
 > `fx_last`, `CUR_MKT_CAP` and especially `px_last_prev` are that day's values,
 > and `px_last_prev` is the last fallback of the CAS reference price. The
-> snapshot date is stored in the file and the report warns when it does not match
-> the day being reported.
+> snapshot date is stored in the file and both scripts warn when it does not
+> match the day being reported.
 
 A snapshot that exists but cannot be used — no `sym` column, no overlap with the
-whitelist — is a **hard error**, not a quiet fall back to kdb: someone put that
-file there deliberately, so a problem with it should surface rather than hide
-behind a query that happens to work.
+whitelist, wrong scope for the consumer — is a **hard error**, not a quiet fall
+back to kdb: someone put that file there deliberately, so a problem with it
+should surface rather than hide behind a query that happens to work.
 
-`config/cas_universe*.csv` is gitignored — it is vendor reference data, and it
-regenerates in one command.
+`config/*_universe.csv` is gitignored — vendor reference data that regenerates in
+one command.
 
 ## 3. Run
 

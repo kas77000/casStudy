@@ -103,7 +103,7 @@ def load_frames(
     *,
     isins: list[str] | None = None,
     skip_market_data: bool = False,
-    universe_csv: str | None = C.CAS_UNIVERSE_FILE,
+    universe_csv=C.UNIVERSE_FILE_CANDIDATES,
     use_universe_csv: bool = True,
     verbose: bool = True,
 ) -> tuple[RawFrames, list[str]]:
@@ -340,7 +340,7 @@ def build_report(
     *,
     isins: list[str] | None = None,
     skip_market_data: bool = False,
-    universe_csv: str | None = C.CAS_UNIVERSE_FILE,
+    universe_csv=C.UNIVERSE_FILE_CANDIDATES,
     use_universe_csv: bool = True,
     drop_unfilled: bool = C.DROP_UNFILLED_ORDERS,
     require_close_wo: bool = C.REQUIRE_CLOSE_WORKORDER,

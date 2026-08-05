@@ -200,6 +200,12 @@ def load_universe_csv(
         snapshot = str(vals[0]) if vals else ""
         df = df.drop(columns=[SNAPSHOT_DATE_COLUMN])
 
+    scope = ""
+    if C.SCOPE_COLUMN in df.columns:
+        vals = [v for v in df[C.SCOPE_COLUMN].unique() if str(v).strip()]
+        scope = str(vals[0]) if vals else ""
+        df = df.drop(columns=[C.SCOPE_COLUMN])
+
     for col in EQUITY_NUMERIC:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col].replace("", None), errors="coerce")
@@ -224,9 +230,10 @@ def load_universe_csv(
     df = df.drop_duplicates(subset=["sym"]).reset_index(drop=True)
 
     if verbose:
+        tag = " / ".join(x for x in (scope, snapshot) if x)
         print(f"[info] universe from {os.path.basename(path)}: {n_read} rows, "
               f"{n_suffix} after the suffix filter, {len(df)} after the ISIN "
-              f"whitelist" + (f" (snapshot {snapshot})" if snapshot else ""))
+              f"whitelist" + (f" ({tag})" if tag else ""))
     if snapshot and date is not None and str(snapshot) != date.isoformat():
         print(
             f"[warn] {os.path.basename(path)} was taken on {snapshot} but the "
@@ -252,19 +259,25 @@ def resolve_universe(
     date: dt.date | None,
     isins: list[str],
     *,
-    csv_path: str | None = None,
+    csv_path=None,
     prefer_csv: bool = True,
     verbose: bool = True,
 ) -> tuple[pd.DataFrame, str]:
     """-> (universe, where it came from).
 
-    `conn_factory` is called only if the CSV is not used, so a run with a
-    snapshot in place never opens the REF connection at all.
+    `csv_path` is one path or several tried in order -- the CAS-only snapshot
+    first, then the whole-book one, since both give the same answer here once the
+    whitelist is applied and the smaller file is cheaper to read.
+
+    `conn_factory` is called only if no CSV is used, so a run with a snapshot in
+    place never opens the REF connection at all.
     """
     if prefer_csv and csv_path:
-        got = load_universe_csv(csv_path, isins, date=date, verbose=verbose)
-        if got is not None:
-            return got, f"csv:{os.path.basename(csv_path)}"
+        candidates = [csv_path] if isinstance(csv_path, (str, os.PathLike)) else list(csv_path)
+        for path in candidates:
+            got = load_universe_csv(str(path), isins, date=date, verbose=verbose)
+            if got is not None:
+                return got, f"csv:{os.path.basename(str(path))}"
     if verbose:
         why = "no snapshot file" if prefer_csv else "--no-universe-file"
         print(f"[info] universe from kdb ({why})")

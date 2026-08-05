@@ -35,10 +35,25 @@ OUTPUT_DIR = os.path.join(PROJECT_DIR, "output")
 INSTANCES_FILE = os.path.join(CONFIG_DIR, "instances.json")
 ISIN_FILE = os.path.join(CONFIG_DIR, "cas_isins.txt")
 
-#: Optional snapshot of the `equity` reference data for the CAS universe.  When
-#: this file exists the report reads it instead of querying kdb; when it does
-#: not, the query runs as before.  Written by tools/export_cas_universe.py.
+#: Optional snapshots of the `equity` reference data.  When one exists the report
+#: reads it instead of querying kdb; when neither does, the query runs as before.
+#: Both are written by tools/export_cas_universe.py.
+#:
+#:   cas_universe.csv    the CAS-eligible subset
+#:   india_universe.csv  every .IN/.IS/.IB listing, CAS or not
 CAS_UNIVERSE_FILE = os.path.join(CONFIG_DIR, "cas_universe.csv")
+INDIA_UNIVERSE_FILE = os.path.join(CONFIG_DIR, "india_universe.csv")
+
+#: Search order for `casretro`.  It narrows whatever it reads with the CAS ISIN
+#: whitelist, so either file gives the same answer; the CAS-only one is smaller,
+#: so it wins when both are present.
+UNIVERSE_FILE_CANDIDATES = (CAS_UNIVERSE_FILE, INDIA_UNIVERSE_FILE)
+
+#: Written into every snapshot so a consumer can tell what it is holding without
+#: having to infer it from the rows.
+SCOPE_COLUMN = "universe_scope"
+SCOPE_CAS = "CAS_ONLY"
+SCOPE_ALL = "ALL_INDIA"
 
 
 # --------------------------------------------------------------------------- #
