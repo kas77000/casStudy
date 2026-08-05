@@ -158,12 +158,28 @@ only close-*eligible*. The parents that traded in the auction are then exactly
 those reached by tracing those child orders' `id_work` back to `id_target` on the
 execution tape.
 
-**The clock has no say.** A fill printing inside 17:45–18:05 on a continuous
-venue is continuous; a close-venue fill stays close however late it reports. A
-fill whose `id_work` matches no child order therefore cannot be credited to the
-close at all — `reconciliation` counts those under *"every fill traces back to a
-child order"*, and a non-zero count there means close quantity is being
-understated.
+**The clock has no say — anywhere.** A fill printing inside 17:45–18:05 on a
+continuous venue is continuous; a close-venue fill stays close however late it
+reports. That applies to the `phase` column too, which is what the close
+rejection and cancellation counts key off: `phase` is `CLOSE` if and only if the
+child order's venue says `CLOSE`, otherwise `CONTINUOUS`.
+
+The time is still recorded, just never consulted for this decision — every
+rejection, cancellation and child order carries `bucket` / `event_bucket` (the
+CAS session it happened in) and `event_phase` / `time_phase` (the clock-only
+view) beside `phase`. So a continuous child order refused at 17:52 is still
+visible as such; it simply no longer counts as a close rejection.
+
+A fill whose `id_work` matches no child order cannot be credited to the close at
+all — `reconciliation` counts those under *"every fill traces back to a child
+order"*, and a non-zero count there means close quantity is being understated.
+
+Three reconciliation checks defend the invariant, and the selftest fails if any
+of them reports:
+
+- *close quantity only ever comes from a close-venue child order*
+- *only parents with a close-venue child order leave the `NOT_SENT` bucket*
+- *each child order's venue is consistent across its rows*
 
 ### 5.2 Why an order missed the close
 
@@ -207,10 +223,12 @@ counting it twice would double the numbers. The exchange's free text
 (`execution.comment`, typically FIX tag 58) is carried onto the surviving row as
 `exchange_text`.
 
-Split into `CONTINUOUS` / `CLOSE` / `POST`: a close-venue child order is always
-`CLOSE`; anything else is placed by the clock against the session calendar.
-Cancellations get the same treatment with `cxl:<reason>` decoded into a
-`reason` column, so the taxonomy can be counted.
+Split into `CONTINUOUS` / `CLOSE` **by venue**: a close-venue child order is
+`CLOSE`, everything else is `CONTINUOUS`. The session it actually happened in is
+in the `bucket` column beside it, so "refused during the CAS window on a
+continuous venue" is still a visible combination — it is just not counted as a
+close rejection. Cancellations get the same treatment, with `cxl:<reason>`
+decoded into a `reason` column so the taxonomy can be counted.
 
 ---
 

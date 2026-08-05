@@ -360,6 +360,69 @@ def build_market() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
 # --------------------------------------------------------------------------- #
 
+def check_venue_only() -> list[str]:
+    """Regression: the clock must never make something count as the close.
+
+    A parent whose child orders all sat on a continuous venue can still have
+    them refused, cancelled and filled *inside* the CAS time window -- the algo
+    is working the continuous book right up to 17:45, and reports arrive later
+    still.  Classifying any of that as "the close" credited auction activity to
+    parents that never had a close-venue child order at all.
+    """
+    from casretro import classify as CL
+
+    wo = pd.DataFrame([
+        # continuous venue, but every timestamp lands inside the CAS window
+        {"id_work": 9001, "id_target": 900, "sym": "X.IN", "side": "buy",
+         "size": 100, "otype": "limit", "price": 10.0, "venue": "NSE",
+         "venuetype": "CLOSE_ELIGIBLE", "state": "rejected:risk",
+         "time": t("17:52:00"), "t_oes_send": t("17:51:59")},
+        {"id_work": 9002, "id_target": 900, "sym": "X.IN", "side": "buy",
+         "size": 200, "otype": "limit", "price": 10.0, "venue": "NSE",
+         "venuetype": "LIT", "state": "cxl:too late",
+         "time": t("18:01:00"), "t_oes_send": t("17:59:00")},
+        {"id_work": 9003, "id_target": 900, "sym": "X.IN", "side": "buy",
+         "size": 300, "otype": "limit", "price": 10.0, "venue": "NSE",
+         "venuetype": "LIT", "state": "filled",
+         "time": t("18:02:00"), "t_oes_send": t("17:44:00")},
+    ])
+    ex = pd.DataFrame([
+        {"id_work": 9003, "id_target": 900, "sym": "X.IN", "side": "buy",
+         "time": t("18:02:30"), "fillsize": 300, "fillprice": 10.0,
+         "ostat": "filled", "size": 300, "otype": "limit"},
+        # an execution we cannot trace to any child order
+        {"id_work": 9999, "id_target": 900, "sym": "X.IN", "side": "buy",
+         "time": t("18:03:00"), "fillsize": 50, "fillprice": 10.0,
+         "ostat": "filled", "size": 50, "otype": "limit"},
+    ])
+
+    ewo = CL.enrich_workorders(wo)
+    eex = CL.enrich_executions(ex, ewo)
+
+    out = []
+    if ewo["is_close"].any():
+        out.append("  venue-only: a non-CLOSE venue was classified as close")
+    if set(ewo["phase"]) != {"CONTINUOUS"}:
+        out.append(f"  venue-only: workorder phase leaked the clock -> "
+                   f"{sorted(set(ewo['phase']))}")
+    if eex["is_close"].any():
+        out.append("  venue-only: an execution on a continuous venue was "
+                   "classified as close")
+    if set(eex["phase"]) != {"CONTINUOUS"}:
+        out.append(f"  venue-only: execution phase leaked the clock -> "
+                   f"{sorted(set(eex['phase']))}")
+    # venuetype reading CLOSE must not be enough on its own
+    if bool(ewo.loc[ewo["id_work"] == 9001, "is_close"].iloc[0]):
+        out.append("  venue-only: venuetype=CLOSE_ELIGIBLE was treated as close")
+    # the untraceable fill must be visible, not silently continuous
+    if eex["traced_to_workorder"].all():
+        out.append("  venue-only: an untraceable execution was not flagged")
+    if not CL.summarise_close_workorders(ewo).empty:
+        out.append("  venue-only: a close-workorder summary was produced with no "
+                   "close-venue child order")
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -465,6 +528,12 @@ def main() -> int:
 
     if EXPECT_DROPPED and not any("nothing executed at all" in w for w in data.warnings):
         failures.append("  the unfilled-order exclusion was not reported as a warning")
+
+    failures += check_venue_only()
+
+    for _, r in data.reconciliation.iterrows():
+        if r["status"] != "OK":
+            failures.append(f"  reconciliation: {r['check']} -- {r['detail']}")
 
     if failures:
         print("SELFTEST FAILED")

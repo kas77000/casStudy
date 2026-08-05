@@ -184,13 +184,20 @@ def enrich_workorders(wo: pd.DataFrame) -> pd.DataFrame:
             send = cand if send is None else send.fillna(cand)
     df["send_time"] = send
 
+    df["event_bucket"] = S.session_of(pd.to_timedelta(df["time"], errors="coerce"))
     df["send_bucket"] = S.session_of(df["send_time"])
+    # Clock-only views, kept as their own columns.  They are descriptive -- a
+    # continuous child order refused at 17:52 is worth seeing as such -- but they
+    # never decide anything, because `phase` below is what the counts key off.
     df["send_phase"] = S.phase_of(df["send_time"])
     df["event_phase"] = S.phase_of(pd.to_timedelta(df["time"], errors="coerce"))
 
-    # A close child order is "of the close" whatever the clock says; otherwise
-    # fall back to when the terminal event happened.
-    df["phase"] = np.where(df["is_close"], "CLOSE", df["event_phase"])
+    # CLOSE if and only if the venue says CLOSE.  The clock has no vote: a child
+    # order on a continuous venue is continuous however late it was refused, and
+    # a close child order is close however early.  Reading the CAS *time window*
+    # as "the close" put parents with no close-venue child order at all into the
+    # close rejection and cancellation counts.
+    df["phase"] = np.where(df["is_close"], "CLOSE", "CONTINUOUS")
 
     df["is_market_order"] = df.get("otype", "").astype(str).str.match(_RE_MARKET_OTYPE).fillna(False)
     return df
@@ -210,11 +217,13 @@ def enrich_executions(ex: pd.DataFrame, wo: pd.DataFrame) -> pd.DataFrame:
     df["bucket"] = S.session_of(pd.to_timedelta(df["time"], errors="coerce"))
     df["time_phase"] = S.phase_of(pd.to_timedelta(df["time"], errors="coerce"))
 
-    venue_by_work = {}
+    # A child order has one row per event, so group rather than zip into a dict:
+    # `dict(zip(...))` silently keeps whichever row happened to come last.
+    venue_by_work = None
     if not wo.empty and "id_work" in wo.columns:
-        venue_by_work = dict(zip(wo["id_work"], wo["is_close"]))
+        venue_by_work = wo.groupby("id_work")["is_close"].any()
 
-    if "id_work" in df.columns and venue_by_work:
+    if "id_work" in df.columns and venue_by_work is not None and len(venue_by_work):
         mapped = df["id_work"].map(venue_by_work)
     else:
         mapped = pd.Series(np.nan, index=df.index)
@@ -225,7 +234,8 @@ def enrich_executions(ex: pd.DataFrame, wo: pd.DataFrame) -> pd.DataFrame:
     # back to a child order is not counted as close -- `_build_reconciliation`
     # reports how many of those there were, because they would be silent misses.
     df["is_close"] = mapped.fillna(False).astype(bool)
-    df["phase"] = np.where(df["is_close"], "CLOSE", df["time_phase"])
+    df["traced_to_workorder"] = mapped.notna()
+    df["phase"] = np.where(df["is_close"], "CLOSE", "CONTINUOUS")
 
     fillsize = pd.to_numeric(df.get("fillsize"), errors="coerce").fillna(0)
     df["fillsize"] = fillsize
@@ -704,7 +714,8 @@ def rejections(wo: pd.DataFrame, ex: pd.DataFrame, orders: pd.DataFrame) -> pd.D
         ])
 
     out = pd.concat(frames, ignore_index=True)
-    out["phase"] = np.where(out["is_close"], "CLOSE", out["phase"])
+    # `phase` already arrives venue-derived from both source frames; re-deriving
+    # it here is what used to let `event_phase` leak the clock back in.
 
     # A refused child order usually lands twice: once as a `workorder.state` and
     # once as an execution report carrying the exchange's free text.  Counting

@@ -562,6 +562,32 @@ def _build_reconciliation(
         f"{over_close} parent orders show more traded in the auction than "
         f"target_state.make reports in total")
 
+    # The invariant behind the whole close section: nothing is credited to the
+    # auction unless a child order actually went to a CLOSE venue.  If the clock
+    # ever creeps back into the classification this is what catches it.
+    ghost = int(((orders["close_qty"] > 0) & (orders["n_close_wo"] <= 0)).sum())
+    add("close quantity only ever comes from a close-venue child order", ghost == 0,
+        f"{ghost} parent orders show auction volume without owning a single "
+        f"workorder whose venue contains CLOSE")
+
+    if "participation" in orders.columns:
+        ghost_part = int(
+            ((orders["participation"] != "NOT_SENT") & (orders["n_close_wo"] <= 0)).sum()
+        )
+        add("only parents with a close-venue child order leave the NOT_SENT bucket",
+            ghost_part == 0,
+            f"{ghost_part} parent orders were classified as having reached the "
+            f"auction without a close-venue workorder")
+
+    if wo is not None and not wo.empty and "id_work" in wo.columns:
+        # A child order has one row per event; they must all agree on the venue,
+        # otherwise `is_close` depends on which row wins.
+        per_work = wo.groupby("id_work")["is_close"].nunique(dropna=False)
+        split = int((per_work > 1).sum())
+        add("each child order's venue is consistent across its rows", split == 0,
+            f"{split} id_work values carry both a CLOSE and a non-CLOSE venue - "
+            f"they are treated as close")
+
     if ex is not None and not ex.empty and "id_work" in ex.columns:
         # Close participation is decided purely by the child order's venue, so an
         # execution that cannot be traced to one is a fill we cannot attribute --
