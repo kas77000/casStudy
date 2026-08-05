@@ -9,10 +9,11 @@
     "",
     "'partitioned': true  -> queries emit  `where date=d, ...`",
     "'partitioned': false -> queries omit the date predicate entirely (RT tables",
-    "                        such as qatt_17031 have no `date` column).",
+    "                        such as the RT qatt have no `date` column).",
     "",
     "FILL IN host / port BEFORE RUNNING.  The ports below are placeholders except",
-    "for the qatt ones, which are implied by the table names qatt_17034 / qatt_17031."
+    "for the qatt ones: 17034 is the historical tape and 17031 the real-time one.",
+    "Those numbers are ports -- the table itself is called `qatt` on both."
   ],
 
   "sources": {
@@ -51,14 +52,14 @@
         "host": "CHANGE_ME",
         "port": 17034,
         "partitioned": true,
-        "tables": { "qatt": "qatt_17034" }
+        "tables": { "qatt": "qatt" }
       },
       "rt": {
         "label": "QATT-RT",
         "host": "CHANGE_ME",
         "port": 17031,
         "partitioned": false,
-        "tables": { "qatt": "qatt_17031" }
+        "tables": { "qatt": "qatt" }
       }
     },
 

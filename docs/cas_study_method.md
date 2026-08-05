@@ -68,19 +68,19 @@ Per sym, computed server-side:
 
 | what | window (HKT) | why |
 |---|---|---|
-| `pxOldRule` | 17:15–17:45 VWAP | the close the **old rule** would have produced |
-| `pxOldRuleWin` | 17:30–18:00 VWAP | the clock window that rule occupied pre-CAS |
-| `pxRef` | 17:30–17:45 VWAP | the exchange's CAS reference price, centre of the ±3% band |
-| `pxPre` | last print before 17:45 | end of continuous, the naive anchor |
-| `pxClose` | first print 17:58–18:00 | the auction print |
-| `volPost`, `dayQty` | 17:45→EOD, whole day | how much volume migrated into the close |
+| `px_old_rule_last30_continuous` | 17:15–17:45 VWAP | the close the **old rule** would have produced |
+| `px_old_rule_clock_1730_1800` | 17:30–18:00 VWAP | the clock window that rule occupied pre-CAS |
+| `px_cas_reference` | 17:30–17:45 VWAP | the exchange's CAS reference price, centre of the ±3% band |
+| `px_last_continuous` | last print before 17:45 | end of continuous, the naive anchor |
+| `px_auction_close` | first print 17:58–18:00 | the auction print |
+| `vol_after_continuous`, `vol_day` | 17:45→EOD, whole day | how much volume migrated into the close |
 
 The close window is 17:58–18:00 because order entry stops at a **random instant**
 in that window and the close is struck there. That randomisation is not an
 inconvenience, it is a gift: the print time is exogenous, so nobody can time it
 and no selection story survives.
 
-S2 therefore ends with a **print-time diagnostic** — the distinct `tClose` values
+S2 therefore ends with a **print-time diagnostic** — the distinct `time_auction_print` values
 and their clustering. A market-wide freeze should put nearly every name on one
 timestamp. A wide spread, or a large `no_close_price` count, means the window is
 catching ordinary trades instead of the auction and everything downstream is
@@ -91,7 +91,7 @@ measuring the wrong thing.
 For every stock:
 
 ```
-effectBps = (pxClose / pxOldRule − 1) × 10 000
+effect_bps = (px_auction_close / px_old_rule_last30_continuous − 1) × 10 000
 ```
 
 The auction print against the close the **old rule** would have produced, for the
@@ -99,13 +99,13 @@ same stock on the same day, out of the same order flow. This is the heart of the
 study, and it is a *within-name* comparison — no size confound, no liquidity
 confound, no matching required, because the stock is compared against itself.
 
-It is also reported in **ticks** (`effectTicks`), which is the unit that compares
+It is also reported in **ticks** (`effect_ticks`), which is the unit that compares
 across names: five paise is one tick on a ₹300 stock and five on a ₹100 one. A
-move under one tick is the price grid, not a move — hence `pct_moved_ge_1_tick`.
+move under one tick is the price grid, not a move — hence `pct_names_moved_ge_1_tick`.
 
 Two secondary readings ride along because their disagreement is informative:
-`moveBps` (against the last continuous print) minus `effectBps` is stale-print
-bias, and `closeVsRefBps` is what the exchange's own ±3% band is measured against.
+`move_vs_last_continuous_bps` (against the last continuous print) minus `effect_bps` is stale-print
+bias, and `close_vs_reference_bps` is what the exchange's own ±3% band is measured against.
 
 #### Which 30 minutes?
 
@@ -128,7 +128,7 @@ Both VWAPs are computed for every name regardless, because their difference is
 worth having:
 
 ```
-windowShiftBps = (pxOldRuleWin / pxOldRule − 1) × 10 000
+window_shift_bps = (px_old_rule_clock_1730_1800 / px_old_rule_last30_continuous − 1) × 10 000
 ```
 
 On a **control** name — no auction in either window — that is pure window
@@ -141,10 +141,10 @@ shift is not evidence of anything.
 Weight each name's effect and the contributions sum, exactly, to the index effect:
 
 ```
-contribBpsᵢ = wᵢ · effectBpsᵢ / Σw          Σ contribBps = index effect
+contribution_bpsᵢ = wᵢ · effect_bpsᵢ / Σw          Σ contribution_bps = index effect
 ```
 
-Ranked by `|contribBps|`, that is the answer to "who are the major players" — and
+Ranked by `|contribution_bps|`, that is the answer to "who are the major players" — and
 it correctly demotes a violent move in a name nobody weights. Three summary
 statistics come with it:
 
@@ -175,9 +175,39 @@ Names outside that range are dropped rather than extrapolated over, and the coun
 is reported.
 
 The control doubles as a **placebo**, twice over: it has no auction, so both its
-own "effect" and its `windowShiftBps` should be small. If either is large, the
+own "effect" and its `window_shift_bps` should be small. If either is large, the
 finding is in the methodology — a drifting market or a 15-minute window shift —
 not in the auction.
+
+**The arm has to exist before it can be subtracted.** S1 counts how many control
+names actually print inside the close window, and the adjustment is withheld
+below `MIN_CONTROL_NAMES` (20). If none of them print, they either migrated to
+CAS as well or they do not trade that late — either way S5 says so and S3/S4 stay
+labelled as *realised* effects rather than isolated ones. Subtracting a mean
+built from three illiquid stocks would be worse than subtracting nothing, because
+it would look like a control.
+
+### The validation step
+
+One number in the report comes from outside this codebase. The whole-day index
+return is rebuilt from constituent returns —
+
+```
+Σ (wᵢ · return_day_bpsᵢ) / Σ wᵢ        against    (close / prev_close − 1) × 10 000
+```
+
+— and compared against the official close-to-close move, supplied by
+`--index-level` and `--index-level-prev`. It tests the weights and the prices at
+once. Agreement within a few bps means the machinery is sound; a wide gap means a
+stale weight file or a constituent whose close was not read, and every effect
+number above it is suspect. The previous close comes from the `equity` table if
+it carries one (probed among several likely column names, or named explicitly
+with `--prev-close-col`); without it the check reports itself unavailable rather
+than silently passing.
+
+Alongside it, the S4 block prints the **cross-sectional standard error** of the
+effect and its t-statistic, so a small index effect is not read as a finding when
+the names behind it disagree wildly.
 
 ## 4. What one day can and cannot tell you
 
@@ -208,9 +238,9 @@ Two further extensions, not built:
 | `casstudy_index_<date>.csv` | one row per group: `NIFTY50`, `CAS_ALL`, `NONCAS`, `NONCAS_MATCHED` |
 | `casstudy_panel.csv` | the same group rows appended across days (`--append-panel`) |
 
-The headline sits in the `NIFTY50` row: `eff_bps_weighted` (and `index_points`
+The headline sits in the `NIFTY50` row: `effect_bps_index_weighted` (and `index_effect_points`
 when `--index-level` is supplied) is what the auction did to the index;
-`net_of_control_bps` is that number with market drift removed.
+`effect_bps_net_of_control_drift` is that number with market drift removed.
 
 ## 6. Assumptions to check before quoting a number
 

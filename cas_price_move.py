@@ -13,28 +13,32 @@ is enough to reproduce the subset.  `--scope universe|nifty` runs just one.
 
 Step 1: pull the CAS universe from the `equity` reference table (same query as
         temp.q: last business day + .IN/.IS/.IB syms + ISIN whitelist).
-Step 2: for every one of those syms, pull out of `qatt_17034`:
-          pxPre         -> last price strictly before CUTOFF_CONTINUOUS
-          pxClose       -> first price inside [CLOSE_WINDOW_START; CLOSE_WINDOW_END]
-          closeRefPrice -> size wavg price over [REF_WINDOW_START; REF_WINDOW_END)
-          volRef        -> volume over that same reference window
-          volPost       -> volume from POST_VOLUME_FROM onward
+Step 2: for every one of those syms, pull out of `qatt`:
+          px_pre_close     -> last price strictly before CUTOFF_CONTINUOUS
+          px_close         -> first price inside [CLOSE_WINDOW_START; CLOSE_WINDOW_END]
+          px_cas_reference -> size wavg price over [REF_WINDOW_START; REF_WINDOW_END)
+          vol_ref_window   -> volume over that same reference window
+          vol_after_cutoff -> volume from POST_VOLUME_FROM onward
 Step 3: write a csv with the move (absolute / ticks / bps) and print a summary.
 
-The move is reported three ways.  `move` is the raw price difference, `moveTicks`
-divides it by the exchange tick applicable at that price (NSE CM bands, effective
-15 Apr 2025 -- see TICK_BANDS), and `moveBps` is the relative move.  Ticks are the
-comparable unit across names: a 5 paise move is one tick on a 300-rupee stock and
-five on a 100-rupee one.
+Every output column says what it is -- `docs/cas_price_move_columns.csv` is the
+full list with definitions, and the q query itself carries the same names, so
+nothing is renamed between the tape and the csv.
+
+The move is reported three ways.  `move_price` is the raw price difference,
+`move_ticks` divides it by the exchange tick applicable at that price (NSE CM
+bands, effective 15 Apr 2025 -- see TICK_BANDS), and `move_bps` is the relative
+move.  Ticks are the comparable unit across names: a 5 paise move is one tick on
+a 300-rupee stock and five on a 100-rupee one.
 
 `config/nifty50_weights.csv` carries the index weight of each NIFTY 50 member.
 When it is present the weight rides along in the output and the summary adds an
 index-weighted mean move, which is what the index actually did, as opposed to the
 equal-weighted average across names.
 
-`closeRefPrice` is the exchange's CAS reference price: the 15:00-15:15 IST VWAP,
-i.e. 17:30-17:45 HKT.  Every CAS order has to sit within +/-3% (=300 bps) of it,
-so `closeVsRefBps` in the output says how close the print came to the band edge.
+`px_cas_reference` is the exchange's CAS reference price: the 15:00-15:15 IST
+VWAP, i.e. 17:30-17:45 HKT.  Every CAS order has to sit within +/-3% (=300 bps)
+of it, so `close_vs_reference_bps` says how close the print came to the band edge.
 
 The NIFTY 50 file comes from either
     tools/nifty50_from_nse.py --resolve-syms          (no Bloomberg needed)
@@ -74,7 +78,9 @@ KDB_PASS = None          # e.g. "pwd"
 KDB_TIMEOUT = 120.0      # seconds
 
 EQUITY_TABLE = "equity"        # REF/equity.csv
-QATT_TABLE = "qatt_17034"      # QATT-HT/qatt.csv
+#: The market-data table is called `qatt` on every instance.  17034 / 17031 are
+#: the HT and RT *ports*, not table names -- overridable with --qatt-table.
+QATT_TABLE = "qatt"            # QATT-HT / QATT-RT
 
 # sym suffixes that identify the Indian listings in the ref table
 SYM_SUFFIXES = ("*.IN", "*.IS", "*.IB")
@@ -376,20 +382,27 @@ def fetch_universe(conn, date: dt.date, isins: list[str]) -> list[str]:
 
 # The joins are folded left explicitly, one `lj` per statement.  Written as
 # `base lj pre lj cls` q would read it right-to-left as `base lj (pre lj cls)`,
-# and a sym with a close print but no pre print would lose its pxClose.
+# and a sym with a close print but no pre print would lose its close price.
+#
+# Column names are spelled out in the query itself rather than renamed on the
+# pandas side, so what you read here is what lands in the csv.
 _PRICES_Q = """
 {{[d;syms]
-  pre: select pxPre: last price, tPre: last time, nPre: count i
+  pre: select px_pre_close: last price, time_pre_close: last time,
+              n_trades_pre_close: count i
        by sym from {tbl}
        where date=d, sym in syms, time < {t1}, not null price{typ};
-  cls: select pxClose: first price, tClose: first time, nClose: count i
+  cls: select px_close: first price, time_close: first time,
+              n_trades_close: count i
        by sym from {tbl}
        where date=d, sym in syms, time within ({t2a};{t2b}), not null price{typ};
-  ref: select closeRefPrice: size wavg price, volRef: sum size, nRef: count i
+  ref: select px_cas_reference: size wavg price, vol_ref_window: sum size,
+              n_trades_ref_window: count i
        by sym from {tbl}
        where date=d, sym in syms, time >= {tr1}, time < {tr2},
              not null price, not null size{typ};
-  pst: select volPost: sum size, vwapPost: size wavg price, nPost: count i
+  pst: select vol_after_cutoff: sum size, vwap_after_cutoff: size wavg price,
+              n_trades_after_cutoff: count i
        by sym from {tbl}
        where date=d, sym in syms, time >= {tp},
              not null price, not null size{typ};
@@ -437,22 +450,25 @@ def build_report(
     df["sym"] = df["sym"].astype(str)
     df.insert(0, "date", date)
 
-    for col in ("nPre", "nClose", "nRef", "nPost"):
+    for col in ("n_trades_pre_close", "n_trades_close", "n_trades_ref_window",
+                "n_trades_after_cutoff"):
         df[col] = df[col].fillna(0).astype("int64")
-    for col in ("volRef", "volPost"):
+    for col in ("vol_ref_window", "vol_after_cutoff"):
         df[col] = df[col].fillna(0.0)
 
-    df["move"] = df["pxClose"] - df["pxPre"]
+    df["move_price"] = df["px_close"] - df["px_pre_close"]
     # Ticks are taken off the price the move starts from, so a name that crosses
     # a band boundary during the move is still measured in the tick it was
-    # trading in.  pxClose stands in when there is no pre price.
-    df["tickSize"] = df["pxPre"].where(df["pxPre"].notna(), df["pxClose"]).map(tick_size)
-    df["moveTicks"] = (df["move"] / df["tickSize"]).round(2)
-    df["moveBps"] = (df["pxClose"] / df["pxPre"] - 1.0) * 10_000.0
+    # trading in.  The close price stands in when there is no pre price.
+    df["tick_size"] = df["px_pre_close"].where(
+        df["px_pre_close"].notna(), df["px_close"]).map(tick_size)
+    df["move_ticks"] = (df["move_price"] / df["tick_size"]).round(2)
+    df["move_bps"] = (df["px_close"] / df["px_pre_close"] - 1.0) * 10_000.0
     # How far the close print sits from the CAS reference price.  The exchange
     # band is +/-3%, i.e. +/-300 bps, so this is directly comparable to it.
-    df["closeVsRefBps"] = (df["pxClose"] / df["closeRefPrice"] - 1.0) * 10_000.0
-    df["direction"] = df["move"].apply(
+    df["close_vs_reference_bps"] = (
+        df["px_close"] / df["px_cas_reference"] - 1.0) * 10_000.0
+    df["move_direction"] = df["move_price"].apply(
         lambda m: "" if pd.isna(m) else ("up" if m > 0 else ("down" if m < 0 else "flat"))
     )
     df["status"] = [
@@ -460,7 +476,7 @@ def build_report(
         "no_pre_price" if (na and not nb) else
         "no_close_price" if (nb and not na) else
         "no_data"
-        for nb, na in zip(df["nPre"] > 0, df["nClose"] > 0)
+        for nb, na in zip(df["n_trades_pre_close"] > 0, df["n_trades_close"] > 0)
     ]
 
     # `weight_pct` is the published index weight, carried in from
@@ -481,15 +497,18 @@ def build_report(
     for col in ("bbg_ticker", "name", "weight_pct"):
         if col not in df.columns:
             df[col] = pd.NA
+    df = df.rename(columns={"name": "company_name",
+                            "weight_pct": "nifty50_weight_pct"})
 
     return df[[
-        "date", "sym", "bbg_ticker", "name", "in_nifty50", "weight_pct",
-        "status", "direction",
-        "pxPre", "tPre", "nPre",
-        "pxClose", "tClose", "nClose",
-        "closeRefPrice", "volRef", "nRef",
-        "volPost", "vwapPost", "nPost",
-        "move", "tickSize", "moveTicks", "moveBps", "closeVsRefBps",
+        "date", "sym", "bbg_ticker", "company_name", "in_nifty50",
+        "nifty50_weight_pct", "status", "move_direction",
+        "px_pre_close", "time_pre_close", "n_trades_pre_close",
+        "px_close", "time_close", "n_trades_close",
+        "px_cas_reference", "vol_ref_window", "n_trades_ref_window",
+        "vol_after_cutoff", "vwap_after_cutoff", "n_trades_after_cutoff",
+        "move_price", "tick_size", "move_ticks", "move_bps",
+        "close_vs_reference_bps",
     ]].sort_values("sym", ignore_index=True)
 
 
@@ -512,8 +531,8 @@ def print_summary(rep: pd.DataFrame, date: dt.date, label: str = "") -> None:
         if status != "ok":
             print(f"    {status:<18} : {n}")
 
-    vol_ref = rep["volRef"].sum()
-    vol_post = rep["volPost"].sum()
+    vol_ref = rep["vol_ref_window"].sum()
+    vol_post = rep["vol_after_cutoff"].sum()
     print()
     label_ref = f"volume {REF_WINDOW_START[:5]}-{REF_WINDOW_END[:5]}"
     label_post = f"volume {POST_VOLUME_FROM[:5]} onward"
@@ -521,7 +540,7 @@ def print_summary(rep: pd.DataFrame, date: dt.date, label: str = "") -> None:
     print(f"  {label_post:<21}: {vol_post:,.0f}")
     if vol_ref:
         print(f"  {'post / reference':<21}: {vol_post / vol_ref:.2f}x")
-    n_ref = int((rep["nRef"] > 0).sum())
+    n_ref = int((rep["n_trades_ref_window"] > 0).sum())
     if n_ref < len(rep):
         print(f"  {'no reference price':<21}: {len(rep) - n_ref} sym(s) "
               f"had no print in the window")
@@ -530,8 +549,8 @@ def print_summary(rep: pd.DataFrame, date: dt.date, label: str = "") -> None:
         print("\n  no sym has both prices -- nothing to summarise")
         return
 
-    bps = ok["moveBps"]
-    ticks = pd.to_numeric(ok.get("moveTicks"), errors="coerce")
+    bps = ok["move_bps"]
+    ticks = pd.to_numeric(ok.get("move_ticks"), errors="coerce")
     print()
     print(f"  mean move            : {bps.mean():+.2f} bps   ({ticks.mean():+.2f} ticks)")
     print(f"  median move          : {bps.median():+.2f} bps   ({ticks.median():+.2f} ticks)")
@@ -539,7 +558,7 @@ def print_summary(rep: pd.DataFrame, date: dt.date, label: str = "") -> None:
     print(f"  up / down / flat     : {(bps > 0).sum()} / {(bps < 0).sum()} / {(bps == 0).sum()}")
 
     # What the index did, as opposed to what the average name did.
-    w = pd.to_numeric(ok.get("weight_pct"), errors="coerce")
+    w = pd.to_numeric(ok.get("nifty50_weight_pct"), errors="coerce")
     if w is not None and w.notna().any():
         m = w.notna() & bps.notna()
         wsum = w[m].sum()
@@ -547,7 +566,7 @@ def print_summary(rep: pd.DataFrame, date: dt.date, label: str = "") -> None:
             print(f"  index-weighted move  : {(bps[m] * w[m]).sum() / wsum:+.2f} bps "
                   f"over {int(m.sum())} weighted names ({wsum:.2f}% of index weight)")
 
-    ref_bps = pd.to_numeric(ok.get("closeVsRefBps"), errors="coerce")
+    ref_bps = pd.to_numeric(ok.get("close_vs_reference_bps"), errors="coerce")
     if ref_bps is not None and ref_bps.notna().any():
         outside = int((ref_bps.abs() > 300).sum())
         print(f"  close vs reference   : {ref_bps.mean():+.2f} bps mean, "
@@ -558,9 +577,9 @@ def print_summary(rep: pd.DataFrame, date: dt.date, label: str = "") -> None:
     print("\n  10 largest moves")
     print(f"    {'sym':<18}{'pxPre':>12}{'pxClose':>12}{'refPx':>12}{'ticks':>9}{'bps':>10}")
     for r in top.itertuples():
-        ref = f"{r.closeRefPrice:>12.4f}" if pd.notna(r.closeRefPrice) else f"{'-':>12}"
-        tks = f"{r.moveTicks:>+9.1f}" if pd.notna(r.moveTicks) else f"{'-':>9}"
-        print(f"    {r.sym:<18}{r.pxPre:>12.4f}{r.pxClose:>12.4f}{ref}{tks}{r.moveBps:>+10.1f}")
+        ref = f"{r.px_cas_reference:>12.4f}" if pd.notna(r.px_cas_reference) else f"{'-':>12}"
+        tks = f"{r.move_ticks:>+9.1f}" if pd.notna(r.move_ticks) else f"{'-':>9}"
+        print(f"    {r.sym:<18}{r.px_pre_close:>12.4f}{r.px_close:>12.4f}{ref}{tks}{r.move_bps:>+10.1f}")
 
 
 def print_comparison(studies: list[tuple[str, str, pd.DataFrame]]) -> None:
@@ -573,11 +592,11 @@ def print_comparison(studies: list[tuple[str, str, pd.DataFrame]]) -> None:
           f"{'|mean| bps':>12}{'vol ref':>16}{'vol post':>16}")
     for key, _label, rep in studies:
         ok = rep[rep["status"] == "ok"]
-        bps = ok["moveBps"]
+        bps = ok["move_bps"]
         mean = f"{bps.mean():+.2f}" if len(bps) else "-"
         amean = f"{bps.abs().mean():.2f}" if len(bps) else "-"
         print(f"  {key:<12}{len(rep):>7}{len(ok):>9}{mean:>11}{amean:>12}"
-              f"{rep['volRef'].sum():>16,.0f}{rep['volPost'].sum():>16,.0f}")
+              f"{rep['vol_ref_window'].sum():>16,.0f}{rep['vol_after_cutoff'].sum():>16,.0f}")
 
 
 # --------------------------------------------------------------------------- #
@@ -601,9 +620,17 @@ def main() -> int:
     ap.add_argument("--out-dir", default=OUTPUT_DIR,
                     help="where the csv files go (default: output/)")
     ap.add_argument("--out", help="output csv path; only valid for a single scope")
+    ap.add_argument("--qatt-table", default=QATT_TABLE,
+                    help=f"market-data table name (default: {QATT_TABLE})")
+    ap.add_argument("--equity-table", default=EQUITY_TABLE,
+                    help=f"reference table name (default: {EQUITY_TABLE})")
     ap.add_argument("--print-query", action="store_true",
                     help="print the q query and exit, without connecting")
     args = ap.parse_args()
+
+    # The queries read these at call time, so rebinding here is enough.
+    globals()["QATT_TABLE"] = args.qatt_table
+    globals()["EQUITY_TABLE"] = args.equity_table
 
     if args.print_query:
         print(prices_query())

@@ -3,7 +3,7 @@
 Two things this module exists to hide:
 
 * **the date predicate.**  HDB tables are partitioned by `date`, the RT tapes are
-  not (qatt_17031 has no `date` column at all).  `where_date()` emits the
+  not (the RT qatt has no `date` column at all).  `where_date()` emits the
   predicate only when the instance says it is partitioned, so the exact same
   query text serves both modes.
 

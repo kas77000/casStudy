@@ -77,11 +77,11 @@ Fill in `host` and `port` for each role. No username/password is sent.
 | role | instance | tables |
 |---|---|---|
 | `oms` | `OMS-HT` / `OMS-RT` | `target`, `target_state`, `workorder`, `execution`, `alerts` |
-| `qatt` | `QATT-HT` (`qatt_17034`) / `QATT-RT` (`qatt_17031`) | market data |
+| `qatt` | `QATT-HT` (port 17034) / `QATT-RT` (port 17031), table `qatt` on both | market data |
 | `ref` | `REF` | `equity`, `fx_last` |
 
 `"partitioned": true` makes every query emit `where date=d, …`; `false` drops the
-date predicate entirely, which is what the RT tapes need (`qatt_17031` has no
+date predicate entirely, which is what the RT tapes need (the RT `qatt` has no
 `date` column). Pick the set with `--mode ht` (default) or `--mode rt`.
 
 Check the wiring before you trust a report:

@@ -58,8 +58,8 @@ FALLBACK_COLS = {
                "adv_std", "px_last_prev", "fx_last", "CUR_MKT_CAP",
                "INDUSTRY_SECTOR", "MARKET_STATUS"],
     "fx_last": ["date", "CRNCY", "fx_last"],
-    "qatt_17034": ["date", "sym", "time", "typ", "price", "size", "totalVolume"],
-    "qatt_17031": ["time", "sym", "typ", "price", "size"],
+    # One table name, two instances: HT carries `date`, RT does not.
+    "qatt": ["date", "sym", "time", "typ", "price", "size", "totalVolume"],
 }
 
 
