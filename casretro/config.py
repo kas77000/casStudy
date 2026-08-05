@@ -35,6 +35,11 @@ OUTPUT_DIR = os.path.join(PROJECT_DIR, "output")
 INSTANCES_FILE = os.path.join(CONFIG_DIR, "instances.json")
 ISIN_FILE = os.path.join(CONFIG_DIR, "cas_isins.txt")
 
+#: Optional snapshot of the `equity` reference data for the CAS universe.  When
+#: this file exists the report reads it instead of querying kdb; when it does
+#: not, the query runs as before.  Written by tools/export_cas_universe.py.
+CAS_UNIVERSE_FILE = os.path.join(CONFIG_DIR, "cas_universe.csv")
+
 
 # --------------------------------------------------------------------------- #
 # Time helpers                                                                 #

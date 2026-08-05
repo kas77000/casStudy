@@ -48,7 +48,18 @@ Paste the ISIN whitelist from `temp.q` into `config/cas_isins.txt`. The raw
 backtick form is fine — every 12-character ISIN token is picked up, duplicates
 dropped, check digits validated.
 
-### 0.3 Verify
+### 0.3 Optional — snapshot the reference data
+
+```bash
+python tools/export_cas_universe.py
+```
+
+Writes `config/cas_universe.csv`. Once it exists the report reads the universe
+from it instead of querying `equity`; delete it, or pass `--no-universe-file`, to
+go back to kdb. The ISIN whitelist is still applied at read time, so
+`cas_isins.txt` changes need no re-export — only new reference data does.
+
+### 0.4 Verify
 
 ```bash
 python -m casretro --check-config
@@ -58,7 +69,7 @@ python -m casretro --check-config --mode rt     # if you will use the RT tapes
 Connects to every configured instance and reports what is reachable and which
 tables are missing. **Do not skip this** — every later step assumes it passed.
 
-### 0.4 Optional — see the shape without a database
+### 0.5 Optional — see the shape without a database
 
 ```bash
 python tools/selftest.py

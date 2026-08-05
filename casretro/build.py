@@ -103,6 +103,8 @@ def load_frames(
     *,
     isins: list[str] | None = None,
     skip_market_data: bool = False,
+    universe_csv: str | None = C.CAS_UNIVERSE_FILE,
+    use_universe_csv: bool = True,
     verbose: bool = True,
 ) -> tuple[RawFrames, list[str]]:
     warnings: list[str] = []
@@ -112,7 +114,13 @@ def load_frames(
             print(msg, flush=True)
 
     # -- universe ----------------------------------------------------------- #
-    uni = U.fetch_universe(pool.get("ref"), date, isins or [])
+    # `pool.get` is passed unevaluated: with a snapshot csv in place the REF
+    # connection is never opened.
+    uni, uni_source = U.resolve_universe(
+        lambda: pool.get("ref"), date, isins or [],
+        csv_path=universe_csv, prefer_csv=use_universe_csv, verbose=verbose,
+    )
+    warnings.append(f"universe source: {uni_source}")
     if uni.empty:
         raise SystemExit(
             "[fatal] the CAS universe came back empty -- check the date, the "
@@ -332,13 +340,17 @@ def build_report(
     *,
     isins: list[str] | None = None,
     skip_market_data: bool = False,
+    universe_csv: str | None = C.CAS_UNIVERSE_FILE,
+    use_universe_csv: bool = True,
     drop_unfilled: bool = C.DROP_UNFILLED_ORDERS,
     require_close_wo: bool = C.REQUIRE_CLOSE_WORKORDER,
     verbose: bool = True,
 ) -> ReportData:
     raw, warnings = load_frames(
         pool, date, flow, isins=isins,
-        skip_market_data=skip_market_data, verbose=verbose,
+        skip_market_data=skip_market_data,
+        universe_csv=universe_csv, use_universe_csv=use_universe_csv,
+        verbose=verbose,
     )
     data = assemble(
         date, pool.mode, flow, raw, warnings,

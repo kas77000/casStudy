@@ -77,6 +77,42 @@ server-side, `sym like "*.IN" | "*.IS" | "*.IB"`, `ID_ISIN in <whitelist>`.
 `--no-isin-filter` takes every `.IN/.IS/.IB` listing instead — useful to check
 whether the whitelist is dropping names it should not.
 
+### 2.3 Optional — `config/cas_universe.csv`
+
+The reference data can come from a csv instead of the `equity` table. If
+`config/cas_universe.csv` exists it is used; if not, the query runs as before.
+Nothing to switch on.
+
+```bash
+python tools/export_cas_universe.py                   # -> config/cas_universe.csv
+python tools/export_cas_universe.py --date 2026-08-04
+python tools/export_cas_universe.py --no-isin-filter  # every .IN/.IS/.IB listing
+python -m casretro --no-universe-file                 # ignore it, query kdb
+```
+
+The export runs the same query the report would have, so the two cannot drift
+apart in shape. With the snapshot in place **and** `--date` supplied, the REF
+connection is never opened at all.
+
+The **ISIN whitelist is applied again at read time**, so narrowing
+`config/cas_isins.txt` takes effect immediately — only a change of reference data
+needs a re-export. That also means you can export once with `--no-isin-filter`
+and let the whitelist do the narrowing from then on.
+
+> **What ages.** `sym`, `ID_ISIN`, `TICKER`, `NAME` are static. `adv`,
+> `fx_last`, `CUR_MKT_CAP` and especially `px_last_prev` are that day's values,
+> and `px_last_prev` is the last fallback of the CAS reference price. The
+> snapshot date is stored in the file and the report warns when it does not match
+> the day being reported.
+
+A snapshot that exists but cannot be used — no `sym` column, no overlap with the
+whitelist — is a **hard error**, not a quiet fall back to kdb: someone put that
+file there deliberately, so a problem with it should surface rather than hide
+behind a query that happens to work.
+
+`config/cas_universe*.csv` is gitignored — it is vendor reference data, and it
+regenerates in one command.
+
 ## 3. Run
 
 ```bash
