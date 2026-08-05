@@ -5,16 +5,16 @@
 imports it, so copy both files across).
 
     python tools/bloomberg_check.py
-    python tools/bloomberg_check.py --backend blpapi --date 2026-08-04
+    python tools/bloomberg_check.py --date 2026-08-04
     python tools/bloomberg_check.py --verbose        # show the data each stage got
 
 It walks the same path the real script takes, one stage at a time, so a failure
 tells you *which* thing is broken instead of just "could not reach Bloomberg":
 
     1  environment      which interpreter, BLPAPI_ROOT
-    2  import           the package loads (wheel present *and* C++ SDK loadable)
+    2  import           blpapi loads (wheel present *and* C++ SDK loadable)
     3  session          a session starts and //blp/refdata opens
-    4  reference data   a plain BDP on the index returns a name
+    4  reference data   a plain reference request on the index returns a name
     5  index members    INDX_MWEIGHT returns a basket with weights
     6  historical       INDX_MWEIGHT_HIST honours END_DATE_OVERRIDE
     7  ISIN             ID_ISIN comes back for the members
@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bloomberg_nifty50 as BN  # noqa: E402
 
 PASS, FAIL, WARN, SKIP = "PASS", "FAIL", "WARN", "SKIP"
+N_STAGES = 8
 
 
 def oneline(s: str, limit: int = 150) -> str:
@@ -76,39 +77,17 @@ class Stage:
         return self
 
 
-# --------------------------------------------------------------------------- #
-# Backend-agnostic data access                                                 #
-# --------------------------------------------------------------------------- #
-
-def xbbg_ref(mod, securities, fields, overrides=None) -> dict[str, dict]:
-    """-> {security: {field_lowercase: value}}."""
-    df = mod.bdp(securities, fields, **(overrides or {}))
-    out: dict[str, dict] = {}
-    if df is None or getattr(df, "empty", True):
-        return out
-    for sec in df.index:
-        out[str(sec)] = {str(k).lower(): v for k, v in df.loc[sec].to_dict().items()}
-    return out
-
-
-class BlpapiClient:
-    """Holds one blpapi session so the stages can share it."""
+class Client:
+    """One blpapi session, shared by the stages that need it."""
 
     def __init__(self, host: str, port: int):
         self.session = BN._blp_session(host, port)
 
-    def ref_data(self, securities, fields, overrides=None) -> dict[str, dict]:
-        out = {}
-        for sec_elem in BN._blp_request(self.session, securities, fields, overrides):
-            sec = sec_elem.getElementAsString("security")
-            row = {}
-            if sec_elem.hasElement("fieldData"):
-                fd = sec_elem.getElement("fieldData")
-                for f in fields:
-                    if fd.hasElement(f):
-                        row[f.lower()] = fd.getElement(f).getValueAsString()
-            out[sec] = row
-        return out
+    def ref(self, securities, fields, overrides=None) -> dict[str, dict]:
+        rows = BN._ref_rows(
+            BN._blp_request(self.session, securities, fields, overrides), fields
+        )
+        return {r["security"]: r for r in rows}
 
     def bulk(self, security, field, overrides=None) -> list[dict]:
         return BN._bulk_rows(
@@ -120,16 +99,6 @@ class BlpapiClient:
             self.session.stop()
         except Exception:
             pass
-
-
-def xbbg_bulk(mod, security, field, overrides=None) -> list[dict]:
-    df = mod.bds(security, field, **(overrides or {}))
-    if df is None or getattr(df, "empty", True):
-        return []
-    rows = []
-    for _, r in df.reset_index(drop=True).iterrows():
-        rows.append({str(k).replace("_", " ").title(): v for k, v in r.to_dict().items()})
-    return rows
 
 
 def _member_of(row: dict):
@@ -145,8 +114,9 @@ def _weight_of(row: dict):
 # --------------------------------------------------------------------------- #
 
 def run(args) -> list[Stage]:
-    stages: list[Stage] = []
     import platform
+
+    stages: list[Stage] = []
 
     # -- 1. environment ---------------------------------------------------- #
     s = Stage(1, "environment")
@@ -155,72 +125,44 @@ def run(args) -> list[Stage]:
     stages.append(s)
 
     # -- 2. import ---------------------------------------------------------- #
-    backends = ("xbbg", "blpapi") if args.backend == "auto" else (args.backend,)
-    s = Stage(2, "import backend")
-    backend = mod = None
-    tried = []
-    for name in backends:
-        try:
-            mod = BN.probe_backend(name)
-            backend = name
-            break
-        except BN.BackendUnavailable as exc:
-            tried.append(exc)
-    if backend is None:
-        s.fail(f"no usable backend out of {', '.join(backends)}")
-        for e in tried:
-            s.notes.append(f"{e.backend}: {oneline(e.reason)}")
-        remedies = []
-        for e in tried:
-            if e.remedy and e.remedy not in remedies:
-                remedies.append(e.remedy)
-        s.remedy = "\n".join(remedies)
+    s = Stage(2, "import blpapi")
+    try:
+        BN.probe_blpapi()
+    except BN.BackendUnavailable as exc:
+        s.fail(oneline(exc.reason), exc.remedy
+               + "\n    Run  python tools/bloomberg_nifty50.py --diagnose  for detail.")
         stages.append(s)
         return stages
     version = ""
     try:
         import importlib.metadata as md
-        version = md.version(backend)
+        version = md.version("blpapi")
     except Exception:
         pass
-    s.ok(f"{backend} {version} loaded"
-         + (f" (skipped: {', '.join(e.backend for e in tried)})" if tried else ""))
+    s.ok(f"blpapi {version} loaded".replace("  ", " "))
     stages.append(s)
 
     client = None
     try:
         # -- 3. session ----------------------------------------------------- #
         s = Stage(3, "session / //blp/refdata")
-        if backend == "blpapi":
-            try:
-                client = BlpapiClient(args.host, args.port)
-                s.ok(f"connected to {args.host}:{args.port}")
-            except Exception as exc:
-                s.fail(str(exc),
-                       "Check the Terminal is running and logged in, and that "
-                       f"{args.host}:{args.port} is right\n"
-                       "    (a local Terminal is localhost:8194; B-PIPE/SAPI is a "
-                       "different host).")
-                stages.append(s)
-                return stages
-        else:
-            s.skip("xbbg opens its own session on first use - covered by stage 4")
+        try:
+            client = Client(args.host, args.port)
+            s.ok(f"connected to {args.host}:{args.port}")
+        except Exception as exc:
+            s.fail(oneline(exc),
+                   "Check the Terminal is running and logged in, and that "
+                   f"{args.host}:{args.port} is right\n"
+                   "    (a local Terminal is localhost:8194; B-PIPE/SAPI is a "
+                   "different host).")
+            stages.append(s)
+            return stages
         stages.append(s)
-
-        def do_ref(securities, fields, overrides=None):
-            if backend == "xbbg":
-                return xbbg_ref(mod, securities, fields, overrides)
-            return client.ref_data(securities, fields, overrides)
-
-        def do_bulk(security, field, overrides=None):
-            if backend == "xbbg":
-                return xbbg_bulk(mod, security, field, overrides)
-            return client.bulk(security, field, overrides)
 
         # -- 4. plain reference data ---------------------------------------- #
         s = Stage(4, f"reference data on {args.index!r}")
         try:
-            got = do_ref([args.index], ["NAME", "CRNCY"])
+            got = client.ref([args.index], ["NAME", "CRNCY"])
             row = got.get(args.index) or (next(iter(got.values()), {}) if got else {})
             if row.get("name"):
                 s.ok(f"NAME = {row['name']}", row)
@@ -229,15 +171,16 @@ def run(args) -> list[Stage]:
                        "Check the ticker spelling and your entitlement. NIFTY 50 is "
                        "`NIFTY Index`.")
         except Exception as exc:
-            s.fail(str(exc), "The session works but the request failed - usually an "
-                             "entitlement or ticker problem.")
+            s.fail(oneline(exc),
+                   "The session works but the request failed - usually an "
+                   "entitlement or ticker problem.")
         stages.append(s)
 
         # -- 5. current basket ---------------------------------------------- #
         s = Stage(5, f"{BN.FIELD_WEIGHT_NOW} (current basket)")
         members_now = []
         try:
-            rows = do_bulk(args.index, BN.FIELD_WEIGHT_NOW)
+            rows = client.bulk(args.index, BN.FIELD_WEIGHT_NOW)
             members_now = [r for r in rows if _member_of(r)]
             weights = [_weight_of(r) for r in members_now]
             have_w = [w for w in weights if w is not None]
@@ -253,7 +196,7 @@ def run(args) -> list[Stage]:
                 s.ok(f"{len(members_now)} members, weights sum to {sum(have_w):.2f}%",
                      members_now)
         except Exception as exc:
-            s.fail(str(exc))
+            s.fail(oneline(exc))
         stages.append(s)
 
         # -- 6. historical basket ------------------------------------------- #
@@ -263,8 +206,8 @@ def run(args) -> list[Stage]:
             s.skip("no --date given; the real script only overrides when asked")
         else:
             try:
-                rows = do_bulk(args.index, BN.FIELD_WEIGHT_HIST,
-                               {"END_DATE_OVERRIDE": asof.strftime("%Y%m%d")})
+                rows = client.bulk(args.index, BN.FIELD_WEIGHT_HIST,
+                                   {"END_DATE_OVERRIDE": asof.strftime("%Y%m%d")})
                 rows = [r for r in rows if _member_of(r)]
                 if not rows:
                     s.warn(f"empty for {asof} - the real script will fall back to "
@@ -275,7 +218,7 @@ def run(args) -> list[Stage]:
                 else:
                     s.ok(f"{len(rows)} members as of {asof}", rows)
             except Exception as exc:
-                s.fail(str(exc))
+                s.fail(oneline(exc))
         stages.append(s)
 
         # -- 7. ISIN entitlement -------------------------------------------- #
@@ -285,7 +228,7 @@ def run(args) -> list[Stage]:
             s.skip("no members to test - stage 5 failed")
         else:
             try:
-                got = do_ref(sample, ["ID_ISIN", "NAME"])
+                got = client.ref(sample, ["ID_ISIN", "NAME"])
                 missing = [x for x in sample if not (got.get(x) or {}).get("id_isin")]
                 if not missing:
                     s.ok(f"all {len(sample)} sampled members have an ISIN", got)
@@ -301,7 +244,7 @@ def run(args) -> list[Stage]:
                            "Those members will not get a sym; fill the isin column in "
                            "by hand.")
             except Exception as exc:
-                s.fail(str(exc))
+                s.fail(oneline(exc))
         stages.append(s)
 
     finally:
@@ -312,12 +255,7 @@ def run(args) -> list[Stage]:
     s = Stage(8, "end-to-end fetch (the real code path)")
     try:
         asof = dt.date.fromisoformat(args.date) if args.date else None
-        if backend == "xbbg":
-            weights, details, source = BN.fetch_via_xbbg(args.index, asof)
-        else:
-            weights, details, source = BN.fetch_via_blpapi(
-                args.index, asof, args.host, args.port
-            )
+        weights, details, source = BN.fetch(args.index, asof, args.host, args.port)
         rows = BN.combine(args.index, asof, source, weights, details)
         with_isin = sum(1 for r in rows if r["isin"])
         total = sum(BN._to_float(r["weight_pct"]) or 0.0 for r in rows)
@@ -330,8 +268,8 @@ def run(args) -> list[Stage]:
         else:
             s.ok(detail, rows[:5])
     except Exception as exc:
-        s.fail(str(exc), "Re-run bloomberg_nifty50.py with --traceback for the full "
-                         "stack.")
+        s.fail(oneline(exc),
+               "Re-run bloomberg_nifty50.py with --traceback for the full stack.")
     stages.append(s)
     return stages
 
@@ -342,7 +280,8 @@ def report(stages: list[Stage], verbose: bool) -> int:
     print()
     width = max(len(s.name) for s in stages) + 2
     for s in stages:
-        print(f"  [{s.n}/8] {s.name:<{width}} {s.status}   {oneline(s.detail, 200)}")
+        print(f"  [{s.n}/{N_STAGES}] {s.name:<{width}} {s.status}   "
+              f"{oneline(s.detail, 200)}")
         for note in s.notes:
             print(f"          . {note}")
         if s.remedy:
@@ -374,17 +313,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--index", default=BN.DEFAULT_INDEX)
     ap.add_argument("--date", help="YYYY-MM-DD; also exercises END_DATE_OVERRIDE")
-    ap.add_argument("--host", default="localhost")
-    ap.add_argument("--port", type=int, default=8194)
-    ap.add_argument("--backend", choices=("auto", "xbbg", "blpapi"), default="auto")
+    ap.add_argument("--host", default=BN.DEFAULT_HOST)
+    ap.add_argument("--port", type=int, default=BN.DEFAULT_PORT)
     ap.add_argument("--members", type=int, default=5,
                     help="how many members to ISIN-test (default: 5)")
     ap.add_argument("--verbose", action="store_true",
                     help="print a sample of what each stage received")
     args = ap.parse_args(argv)
 
-    print(f"Bloomberg check -- index={args.index!r} backend={args.backend} "
-          f"{args.host}:{args.port}")
+    print(f"Bloomberg check -- index={args.index!r} {args.host}:{args.port}")
     return report(run(args), args.verbose)
 
 

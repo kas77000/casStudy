@@ -385,9 +385,10 @@ casretro/
 tools/
   selftest.py          synthetic end-to-end run, no database needed
   dump_queries.py      print every q query without touching a database
-  bloomberg_nifty50.py NIFTY 50 members + weights   (Bloomberg machine)
-  bloomberg_check.py   8-stage check that Bloomberg works (Bloomberg machine)
-  map_nifty50_syms.py  resolve each member to a kdb sym   (kdb machine)
+  nifty50_from_nse.py  NIFTY 50 members from NSE's public list (no Bloomberg)
+  bloomberg_nifty50.py NIFTY 50 members + free-float weights (Bloomberg machine)
+  bloomberg_check.py   8-stage check that Bloomberg works    (Bloomberg machine)
+  map_nifty50_syms.py  resolve each member to a kdb sym      (kdb machine)
 config/
   instances.json host/port per instance
   cas_isins.txt  the CAS ISIN whitelist
@@ -411,10 +412,49 @@ the reference price and the volume either side of the auction.
 
 ### 10.1 Building the NIFTY 50 file
 
-Two scripts, because Bloomberg and kdb do not live on the same machine.
+**Step 1 — get the members.** Two routes. Both write the same columns, so
+everything downstream is identical.
 
-**Step 1 — on the Bloomberg machine.** Needs a Terminal or B-PIPE session and
-either `xbbg` or `blpapi`. Copy `bloomberg_nifty50.py` and `bloomberg_check.py`
+#### Route A — NSE's public list (no Bloomberg)
+
+```bash
+python tools/nifty50_from_nse.py --out config/nifty50.csv --expect 50
+python tools/nifty50_from_nse.py --file ind_nifty50list.csv    # offline
+python tools/nifty50_from_nse.py --resolve-syms                # steps 1 and 2 in one go
+```
+
+NSE publishes the constituent list at
+`https://archives.nseindia.com/content/indices/ind_nifty50list.csv` as
+
+```
+Company Name, Industry, Symbol, Series, ISIN Code
+```
+
+It carries **ISIN**, which is the only key `map_nifty50_syms.py` matches on — so
+the universe half of the job is fully covered by a free, public file. Verified:
+50 members, 50 with an ISIN.
+
+What it does **not** carry is index weights; NSE publishes those only in the
+monthly factsheet PDF. Three ways to fill the column, most trustworthy first:
+
+| | what you get |
+|---|---|
+| `--weights-file FILE` | your own CSV with an ISIN (or symbol) column and a weight column — exact, if the file is |
+| `--weights-from-equity` | derived from `equity.CUR_MKT_CAP`. **Full** market cap, not free float, so promoter-heavy names come out too heavy. Labelled `EQUITY_CUR_MKT_CAP_APPROX` |
+| *(nothing)* | `weight_pct` left blank |
+
+Leaving it blank costs you exactly one thing: the index-weighted average line in
+`cas_price_move.py`. Filtering, the reference price, the volumes and every other
+column need only `sym`, which needs only ISIN.
+
+`--list-name` takes any NSE index file (`ind_nifty500list`,
+`ind_niftynext50list`, …). If the kdb box has no internet, download the CSV
+anywhere and pass `--file`; that mode never touches the network.
+
+#### Route B — Bloomberg (`blpapi`)
+
+Use this when you want the **published free-float weights**. Needs a Terminal or
+B-PIPE session and `blpapi`. Copy `bloomberg_nifty50.py` and `bloomberg_check.py`
 across; they depend on nothing else in this project.
 
 Check the setup first — it walks the same path one stage at a time, so a failure
@@ -428,8 +468,8 @@ python tools/bloomberg_check.py --verbose           # show the data each stage g
 
 ```
   [1/8] environment                             PASS   python 3.11.4 at C:\...\python.exe
-  [2/8] import backend                          PASS   xbbg 0.7.7 loaded
-  [3/8] session / //blp/refdata                 SKIP   xbbg opens its own session
+  [2/8] import blpapi                           PASS   blpapi 3.24.6 loaded
+  [3/8] session / //blp/refdata                 PASS   connected to localhost:8194
   [4/8] reference data on 'NIFTY Index'         PASS   NAME = NIFTY 50 Index
   [5/8] INDX_MWEIGHT (current basket)           PASS   50 members, weights sum to 100.00%
   [6/8] INDX_MWEIGHT_HIST + END_DATE_OVERRIDE   PASS   50 members as of 2026-08-04
@@ -446,22 +486,21 @@ Then the pull itself:
 python tools/bloomberg_nifty50.py --out config/nifty50.csv
 python tools/bloomberg_nifty50.py --date 2026-08-04       # that day's basket
 python tools/bloomberg_nifty50.py --index "NIFTY Index"   # or any other index
-python tools/bloomberg_nifty50.py --diagnose              # what is importable, and from where
+python tools/bloomberg_nifty50.py --diagnose              # is blpapi importable, and from where
 python tools/bloomberg_nifty50.py --traceback             # full stack on failure
 ```
-
-> **If it reports a backend as not installed when you know it is:** that was a
-> bug, fixed. `blpapi` raises a plain `ImportError` — not `ModuleNotFoundError` —
-> when the wheel is installed but its **C++ SDK library** cannot be loaded, and
-> `xbbg` imports `blpapi` so it failed identically. Both were reported as "not
-> installed". They are now told apart, and `--diagnose` prints the interpreter in
-> use, `BLPAPI_ROOT`, and each package's location and real import error.
 
 Weights come from `INDX_MWEIGHT_HIST` with an `END_DATE_OVERRIDE`. If that field
 returns nothing the script falls back to `INDX_MWEIGHT` — the *current* basket —
 and says so loudly, because a file labelled with a past date that quietly holds
-today's weights is worse than no file. It also pulls `ID_ISIN` per member, which
-is what makes step 2 reliable.
+today's weights is worse than no file.
+
+> **If it reports blpapi as not installed when you know it is:** that was a bug,
+> fixed. `blpapi` raises a plain `ImportError` — not `ModuleNotFoundError` — when
+> the wheel is installed but its **C++ SDK library** cannot be loaded, and that
+> was being reported as a missing package. The two are now told apart, and
+> `--diagnose` prints the interpreter in use, `BLPAPI_ROOT`, and the real import
+> error.
 
 **Step 2 — on the kdb machine.** Copy the file across, then:
 
