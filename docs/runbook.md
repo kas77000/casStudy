@@ -1,7 +1,13 @@
 # Runbook — what to run, in what order
 
-Two reports come out of this repo and they are **independent**. Only the
-price-move report needs the NIFTY 50 file.
+Three reports come out of this repo and they are **independent**, answering
+different questions off the same tapes:
+
+| path | question | needs |
+|---|---|---|
+| A — `casretro` | what did **our orders** do in the auction? | §0.1, §0.2 |
+| B — `cas_price_move` | how far did prices move into the close? | + the NIFTY 50 file |
+| C — `casStudy` | what did the auction do to the **index**? | + index weights, whole-book universe |
 
 ```
   SETUP (once)
@@ -9,22 +15,24 @@ price-move report needs the NIFTY 50 file.
     config/cas_isins.txt  ── the CAS ISIN whitelist
     python -m casretro --check-config
          │
-         ├──────────────────────────────┐
-         │                              │
-    PATH A                          PATH B
-    retrospective                   price move
-         │                              │
-         │                         build the NIFTY 50 file
-         │                          ├─ Route A: nifty50_from_nse.py   (no Bloomberg)
-         │                          └─ Route B: bloomberg_check.py
-         │                                     bloomberg_nifty50.py   (Bloomberg box)
-         │                                     → copy the file across
-         │                                     map_nifty50_syms.py    (kdb box)
-         │                              │
-    python -m casretro            python cas_price_move.py
-         │                              │
+         ├──────────────────────────────┬───────────────────────────┐
+         │                              │                           │
+    PATH A                          PATH B                      PATH C
+    retrospective                   price move                  index impact
+         │                              │                           │
+         │                         build the NIFTY 50 file     config/nifty50_weights.csv
+         │                          ├─ Route A: nifty50_from_nse.py    (index weights)
+         │                          └─ Route B: bloomberg_check.py     export_cas_universe.py
+         │                                     bloomberg_nifty50.py      --scope all
+         │                                     → copy the file across  (the control arm)
+         │                                     map_nifty50_syms.py          │
+         │                              │                                   │
+    python -m casretro            python cas_price_move.py          python casStudy.py
+         │                              │                                   │
     output/cas_retro_<date>_<flow>/   output/cas_price_move_universe_<date>.csv
                                      output/cas_price_move_nifty50_<date>.csv
+                                                              output/casstudy_syms_<date>.csv
+                                                              output/casstudy_index_<date>.csv
 ```
 
 ---
@@ -51,13 +59,31 @@ dropped, check digits validated.
 ### 0.3 Optional — snapshot the reference data
 
 ```bash
-python tools/export_cas_universe.py
+python tools/export_cas_universe.py                 # both files
+python tools/export_cas_universe.py --scope all     # the one Path C needs
 ```
 
-Writes `config/cas_universe.csv`. Once it exists the report reads the universe
-from it instead of querying `equity`; delete it, or pass `--no-universe-file`, to
-go back to kdb. The ISIN whitelist is still applied at read time, so
-`cas_isins.txt` changes need no re-export — only new reference data does.
+Two files, because the consumers want different things:
+
+| file | contents | used by |
+|---|---|---|
+| `config/cas_universe.csv` | the CAS-eligible subset | `casretro` |
+| `config/india_universe.csv` | the whole Indian book | `casretro` **and** `casStudy` |
+
+Once a file exists the universe is read from it instead of querying `equity`;
+delete it, or pass `--no-universe-file`, to go back to kdb. The ISIN whitelist is
+applied again at read time, so `cas_isins.txt` changes need no re-export — only
+new reference data does.
+
+**Path C needs the whole-book file.** Its control arm *is* the non-CAS names, so
+a CAS-only snapshot leaves it with nothing to control against, and it refuses to
+run on one rather than quietly reporting an unadjusted number.
+
+The universe is **NSE `.IN` listings only**. `--suffixes .IN,.IS,.IB` widens it
+to every Indian listing line if you need them; whichever was used is recorded in
+the file's `universe_suffixes` column. Check the count the exporter prints — if
+the CAS-eligible number comes back below the number of ISINs in your whitelist,
+some names live on a listing line the filter is excluding.
 
 ### 0.4 Verify
 
@@ -72,10 +98,12 @@ tables are missing. **Do not skip this** — every later step assumes it passed.
 ### 0.5 Optional — see the shape without a database
 
 ```bash
-python tools/selftest.py
+python tools/selftest.py             # Path A: the retrospective
+python tools/selftest_casstudy.py    # Path C: the index study
 ```
 
-Runs the whole analytical layer on synthetic frames. No kdb, no pykx connection.
+Both run the whole analytical layer on synthetic frames — no kdb, no pykx
+connection. Run the matching one after any change to the rules it guards.
 
 ---
 
@@ -210,7 +238,17 @@ the auction did to the index. The reasoning is in
 python tools/selftest_casstudy.py
 ```
 
-**Then, on the kdb box:**
+### Inputs
+
+Beyond §0.1 and §0.2:
+
+| input | why | if missing |
+|---|---|---|
+| `config/nifty50_weights.csv` | the index weights every weighted number rests on (49 of 50 members today) | no index effect, no attribution |
+| `config/india_universe.csv` — `--scope all` | the non-CAS names **are** the control arm | falls back to kdb; a CAS-only snapshot is rejected |
+| official NIFTY 50 closes, today and previous | turns the reconciliation into pass/fail, and bps into points | the check reports itself unavailable |
+
+### Run
 
 ```bash
 # 1. look at the query before sending it
@@ -221,18 +259,36 @@ python casStudy.py --date 2026-08-04 \
     --index-level 24812.05 --index-level-prev 24735.20
 ```
 
-Read the output top down. **S1** must show a populated control arm — non-CAS
-names printing in the close window — or S5 has nothing to subtract. **S2** must
-show the auction prints clustering on one instant; a wide spread means the
-17:58–18:00 window is catching ordinary trades. The **check** block at the bottom
-is the one that matters on day one: if the rebuilt index return disagrees with
-the official move by more than a few bps, stop and fix the weights before quoting
-anything above it.
+### Read it top down — each block gates the next
 
-Two inputs it needs beyond the CAS whitelist: `config/nifty50_weights.csv` (index
-weights, currently 49 of 50 members) and, for the control arm, a **whole**
-universe export — `python tools/export_cas_universe.py --no-isin-filter`. A
-CAS-only snapshot is rejected, because the non-CAS names *are* the control.
+**S1 — is there a control arm?** It prints how many non-CAS names actually print
+inside the close window. Below 20 the drift adjustment is withheld and S5 says
+so; the effect then stands as a *realised* move, not an isolated one. If none of
+them print, they have either migrated to CAS as well or they do not trade that
+late, and no amount of arithmetic downstream will fix it.
+
+**S2 — is the window catching the auction?** The prints should cluster on
+essentially one instant, because the freeze is market-wide. A wide spread, or a
+large `no_close_price` count, means 17:58–18:00 is picking up ordinary trades and
+everything below is measuring the wrong thing.
+
+**S3/S4 — the answer.** The effect against the old rule, the index effect, and
+the names that caused it. A t-statistic under 2 is printed as *not
+distinguishable from zero* — read it before quoting the number.
+
+**check — the one number from outside this codebase.** If the rebuilt index
+return disagrees with the official close-to-close by more than a few bps, stop:
+the weights are stale or a constituent's close was not read, and every number
+above it is suspect.
+
+### Knobs you may need
+
+| situation | flag |
+|---|---|
+| the reconciliation says no previous close was found | `--prev-close-col <name>` |
+| the market-data table is not called `qatt` | `--qatt-table <name>` |
+| you want the old 17:30–18:00 window (contaminated for CAS names — controls only) | `--old-rule-window clock-1730-1800` |
+| a snapshot exists but you want to hit kdb | `--no-universe-file` |
 
 Add `--append-panel` to accumulate one row per group per day into
 `output/casstudy_panel.csv`; a single day is an observation, the panel is what
@@ -252,7 +308,9 @@ python casStudy.py --append-panel     # Path C
 
 The NIFTY 50 file is static between index rebalances — NSE reviews
 semi-annually, in March and September. Re-run Path B step 1 then, or whenever a
-constituent changes.
+constituent changes, and refresh `config/nifty50_weights.csv` at the same time:
+`casStudy` warns when its `asof` is more than 45 days behind the study date,
+because a missed rebalance corrupts every weighted number silently.
 
 ---
 
@@ -271,6 +329,8 @@ constituent changes.
 | you changed classification rules | `python tools/selftest.py` |
 | you changed the index study | `python tools/selftest_casstudy.py` |
 | the index effect looks too big | the `check` block — reconciliation against the official close-to-close |
+| the universe looks too short | the exporter's count line; `--suffixes .IN,.IS,.IB` to widen |
+| `casStudy` refuses the universe file | it is the CAS-only snapshot — export `--scope all` |
 
 `--traceback` on `bloomberg_nifty50.py` prints the full stack instead of the
 summary.

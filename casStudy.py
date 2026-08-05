@@ -898,6 +898,13 @@ def main() -> int:
     ap.add_argument("--date", help="YYYY-MM-DD; default = last business day (server side)")
     ap.add_argument("--isin-file", default=ISIN_FILE, help="CAS ISIN whitelist")
     ap.add_argument(
+        "--sym-chunk", type=int, default=SYM_CHUNK,
+        help=f"syms per price query (default: {SYM_CHUNK}). The query now reads "
+             f"the day once per chunk and holds that slice in memory on the kdb "
+             f"side, so lower this if the server is tight on memory and raise it "
+             f"to cut round trips",
+    )
+    ap.add_argument(
         "--universe-file", default=None,
         help="csv snapshot of the equity reference data. Default: "
              "config/india_universe.csv, then config/cas_universe.csv, then kdb. "
@@ -1013,7 +1020,7 @@ def main() -> int:
                   "the equity table disagree", file=sys.stderr)
             return 1
 
-        raw = fetch_prices(conn, date, universe["sym"].tolist())
+        raw = fetch_prices(conn, date, universe["sym"].tolist(), args.sym_chunk)
 
     if args.old_rule_window == "clock-1730-1800":
         print("[warn] the 17:30-18:00 window contains the auction print for CAS "
