@@ -94,6 +94,24 @@ The count and the quantity removed are printed and land in the run parameters of
 every output. `--keep-unfilled` puts them back (`config.DROP_UNFILLED_ORDERS` is
 the default).
 
+### The report covers close participants
+
+A second filter narrows it further: a parent order is kept only if it owns at
+least one child order whose `venue` contains `CLOSE`, **sent at or after 17:45
+HKT**. Orders that never reached the auction are dropped before anything is
+counted.
+
+> **What this costs.** `NOT_SENT` disappears, and with it the whole
+> non-participation waterfall — `NO_CLOSE_INSTRUCTION`, `FULLY_FILLED_BEFORE_CAS`,
+> `ALGO_NEVER_COMMITTED_TO_CLOSE` and the rest can only fire on orders that never
+> got to the close. §5.2 documents rules that no longer trigger under the default.
+> **`--keep-no-close` brings that analysis back**
+> (`config.REQUIRE_CLOSE_WORKORDER`, `config.CLOSE_WORKORDER_AFTER`).
+
+What survives is the population that actually competed in the auction, so
+`SENT_NOT_FILLED` versus `FILLED_IN_CLOSE` becomes the question the report
+answers.
+
 Output lands in `output/cas_retro_<date>_<flow>/`.
 
 ### Running without a database
@@ -232,6 +250,25 @@ in the `bucket` column beside it, so "refused during the CAS window on a
 continuous venue" is still a visible combination — it is just not counted as a
 close rejection. Cancellations get the same treatment, with `cxl:<reason>`
 decoded into a `reason` column so the taxonomy can be counted.
+
+#### The 17:58 tag
+
+Both tables carry a **second, independent** classification, this one on the
+clock: `rejection_type` and `cancel_type`, split at **17:58 HKT** — the random
+close, from which the auction can freeze at any moment.
+
+| column | values |
+|---|---|
+| `rejection_type` | `REJECTION` / `AFTER_CLOSE_REJECTION` |
+| `cancel_type` | `CANCEL` / `AFTER_CLOSE_CANCEL` |
+
+The distinction is about runway, not venue: before 17:58 a refusal can be
+corrected and re-sent, after it there may be no auction left to re-send into.
+
+Two things to be clear about. It **labels, never drops** — every rejection and
+cancellation stays in its table, so the reason taxonomy is still complete. And it
+is kept strictly apart from `phase`, which remains venue-only; the clock decides
+this tag and nothing else. `config.AFTER_CLOSE_FROM` moves the boundary.
 
 ---
 

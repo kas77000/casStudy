@@ -246,6 +246,37 @@ def flow_of(basket: str | None) -> str:
 #: to see the whole book again.
 DROP_UNFILLED_ORDERS = True
 
+#: Keep only parent orders that actually put something into the auction: at
+#: least one child order whose `venue` contains CLOSE, sent at or after
+#: `CLOSE_WORKORDER_AFTER`.
+#:
+#: This is a deliberate narrowing of the report to close *participants*.  The
+#: cost is the whole NOT_SENT population and with it the non-participation
+#: waterfall -- `NO_CLOSE_INSTRUCTION`, `FULLY_FILLED_BEFORE_CAS`,
+#: `ALGO_NEVER_COMMITTED_TO_CLOSE` and the rest can only fire on orders that
+#: never reached the auction.  Set to False (or pass --keep-no-close) to get
+#: that analysis back.
+REQUIRE_CLOSE_WORKORDER = True
+
+#: A close child order only counts if it left at or after this time.  Order
+#: entry for the auction opens at 17:50 HKT, so anything stamped before the
+#: 17:45 CTS/CAS boundary is not a genuine auction order.
+CLOSE_WORKORDER_AFTER = CTS_END
+
+#: Boundary for the "after the close began" tag carried by both rejections and
+#: cancellations.  It is the random-close start: from here the auction can freeze
+#: at any moment, so a refusal or a cancel is not just a refusal or a cancel --
+#: there may have been no runway left to correct it and re-send.
+#:
+#: Nothing is dropped on this boundary; it only labels, so the late ones can be
+#: counted separately without disappearing from the taxonomy.
+AFTER_CLOSE_FROM = RANDOM_CLOSE_START   # 17:58 HKT / 15:28 IST
+
+REJECTION_PLAIN = "REJECTION"
+REJECTION_AFTER_CLOSE = "AFTER_CLOSE_REJECTION"
+CANCEL_PLAIN = "CANCEL"
+CANCEL_AFTER_CLOSE = "AFTER_CLOSE_CANCEL"
+
 #: A residual smaller than this many shares (or than this fraction of the parent)
 #: is treated as "done" rather than as a genuine miss.
 RESIDUAL_ABS_TOL = 0

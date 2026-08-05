@@ -76,6 +76,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "default - the report covers orders that traded, fully or in part; "
              "a rejected order that still completed a percentage is always kept)",
     )
+    ap.add_argument(
+        "--keep-no-close", action="store_true",
+        help="keep parent orders that never sent a CLOSE-venue child order after "
+             "17:45 HKT (dropped by default - the report covers close "
+             "participants). Pass this to get the NOT_SENT population and the "
+             "non-participation waterfall back",
+    )
     ap.add_argument("--quiet", action="store_true", help="suppress progress output")
     ap.add_argument(
         "--check-config", action="store_true",
@@ -165,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
             isins=isins,
             skip_market_data=args.no_market_data,
             drop_unfilled=not args.keep_unfilled,
+            require_close_wo=not args.keep_no_close,
             verbose=not args.quiet,
         )
 

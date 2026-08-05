@@ -186,6 +186,7 @@ def assemble(
     warnings: list[str] | None = None,
     *,
     drop_unfilled: bool = C.DROP_UNFILLED_ORDERS,
+    require_close_wo: bool = C.REQUIRE_CLOSE_WORKORDER,
 ) -> ReportData:
     warnings = list(warnings or [])
 
@@ -232,6 +233,31 @@ def assemble(
                     f"{n_drop} parent order{'s' if n_drop != 1 else ''} "
                     f"({dropped_qty:,.0f} shares) excluded: nothing executed "
                     f"at all (--keep-unfilled to keep them)"
+                )
+
+        # orders that never reached the auction ------------------------------ #
+        # Narrows the report to close participants.  Note what this costs: the
+        # NOT_SENT population disappears, and so does the non-participation
+        # waterfall, which can only fire on orders that never got there.
+        if require_close_wo:
+            cutoff = C.CLOSE_WORKORDER_AFTER
+            qualifying = CL.targets_with_close_workorder(wo, cutoff)
+            drop = ~orders["id_target"].isin(qualifying)
+            n_drop = int(drop.sum())
+            if n_drop:
+                dropped_ids = set(orders.loc[drop, "id_target"])
+                dropped_qty = float(orders.loc[drop, "size"].sum())
+                orders = orders[~drop].reset_index(drop=True)
+                wo = _without_ids(wo, dropped_ids)
+                ex = _without_ids(ex, dropped_ids)
+                states = _without_ids(states, dropped_ids)
+                alerts = _without_ids(alerts, dropped_ids)
+                warnings.append(
+                    f"{n_drop} parent order{'s' if n_drop != 1 else ''} "
+                    f"({dropped_qty:,.0f} shares) excluded: no CLOSE-venue child "
+                    f"order sent at or after {cutoff.strftime('%H:%M')} HKT "
+                    f"(--keep-no-close to keep them, and to get the "
+                    f"non-participation waterfall back)"
                 )
 
         # market context ---------------------------------------------------- #
@@ -307,6 +333,7 @@ def build_report(
     isins: list[str] | None = None,
     skip_market_data: bool = False,
     drop_unfilled: bool = C.DROP_UNFILLED_ORDERS,
+    require_close_wo: bool = C.REQUIRE_CLOSE_WORKORDER,
     verbose: bool = True,
 ) -> ReportData:
     raw, warnings = load_frames(
@@ -314,7 +341,8 @@ def build_report(
         skip_market_data=skip_market_data, verbose=verbose,
     )
     data = assemble(
-        date, pool.mode, flow, raw, warnings, drop_unfilled=drop_unfilled,
+        date, pool.mode, flow, raw, warnings,
+        drop_unfilled=drop_unfilled, require_close_wo=require_close_wo,
     )
     if verbose:
         for w in data.warnings[len(warnings):]:
@@ -640,6 +668,11 @@ def _build_summary(
             if cxl is not None and not cxl.empty and "flow" in cxl.columns:
                 cx = cxl[cxl["flow"] == label]
 
+        def _count_col(df_: pd.DataFrame, col: str, value: str) -> int:
+            if df_ is None or df_.empty or col not in df_.columns:
+                return 0
+            return int((df_[col] == value).sum())
+
         def phase_count(df_: pd.DataFrame, phase: str) -> int:
             if df_ is None or df_.empty or "phase" not in df_.columns:
                 return 0
@@ -661,8 +694,14 @@ def _build_summary(
             "participation_rate_pct": (part == "FILLED_IN_CLOSE").mean() * 100.0 if n else np.nan,
             "rejections_continuous": phase_count(rj, "CONTINUOUS"),
             "rejections_close": phase_count(rj, "CLOSE"),
+            "rejections_plain": _count_col(rj, "rejection_type", C.REJECTION_PLAIN),
+            "rejections_after_close": _count_col(
+                rj, "rejection_type", C.REJECTION_AFTER_CLOSE),
             "cancellations_continuous": phase_count(cx, "CONTINUOUS"),
             "cancellations_close": phase_count(cx, "CLOSE"),
+            "cancellations_plain": _count_col(cx, "cancel_type", C.CANCEL_PLAIN),
+            "cancellations_after_close": _count_col(
+                cx, "cancel_type", C.CANCEL_AFTER_CLOSE),
             "mean_close_capture_bps": df.get("close_capture_bps", pd.Series(dtype=float)).mean(),
             "mean_perf_vs_close_bps": df.get("perf_vs_close_bps", pd.Series(dtype=float)).mean(),
             "residual_notional_at_close": df.get(

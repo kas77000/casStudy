@@ -170,8 +170,15 @@ def print_console(data: ReportData) -> None:
               f"{_fmt(r['orders_sent_not_filled'],0)} sent-not-filled / "
               f"{_fmt(r['orders_not_sent'],0)} never sent"
               f"   ({_fmt(r['participation_rate_pct'],1,pct=True)} of orders)")
-        print(f"    rejections             : {_fmt(r['rejections_continuous'],0)} continuous / "
+        print(f"    rejections by venue    : {_fmt(r['rejections_continuous'],0)} continuous / "
               f"{_fmt(r['rejections_close'],0)} close")
+        print(f"    rejections by time     : {_fmt(r.get('rejections_plain'),0)} "
+              f"{C.REJECTION_PLAIN} / "
+              f"{_fmt(r.get('rejections_after_close'),0)} {C.REJECTION_AFTER_CLOSE}"
+              f"  (from {C.AFTER_CLOSE_FROM.strftime('%H:%M')} HKT)")
+        print(f"    cancels by time        : {_fmt(r.get('cancellations_plain'),0)} "
+              f"{C.CANCEL_PLAIN} / "
+              f"{_fmt(r.get('cancellations_after_close'),0)} {C.CANCEL_AFTER_CLOSE}")
         print(f"    cancellations          : {_fmt(r['cancellations_continuous'],0)} continuous / "
               f"{_fmt(r['cancellations_close'],0)} close")
         print(f"    close capture          : {_fmt(r['mean_close_capture_bps'],1)} bps mean "
@@ -582,13 +589,25 @@ def write_html(data: ReportData, path: str) -> str:
 
         # -- rejections ----------------------------------------------------- #
         rej, cxl = data.rejections, data.cancellations
+        def _n(df, col, val):
+            return int((df[col] == val).sum()) if (not df.empty and col in df.columns) else 0
+
         rj_tiles = [
-            _tile("Rejections - continuous", f"{int((rej['phase'] == 'CONTINUOUS').sum()) if not rej.empty else 0:,}",
-                  "child orders refused before 17:45 HKT"),
-            _tile("Rejections - close", f"{int((rej['phase'] == 'CLOSE').sum()) if not rej.empty else 0:,}",
-                  "child orders refused during CAS"),
-            _tile("Cancellations - continuous", f"{int((cxl['phase'] == 'CONTINUOUS').sum()) if not cxl.empty else 0:,}", ""),
-            _tile("Cancellations - close", f"{int((cxl['phase'] == 'CLOSE').sum()) if not cxl.empty else 0:,}", ""),
+            _tile("Rejections - continuous", f"{_n(rej, 'phase', 'CONTINUOUS'):,}",
+                  "on a continuous venue"),
+            _tile("Rejections - close", f"{_n(rej, 'phase', 'CLOSE'):,}",
+                  "on a CLOSE venue"),
+            _tile(C.REJECTION_AFTER_CLOSE.replace("_", " ").title(),
+                  f"{_n(rej, 'rejection_type', C.REJECTION_AFTER_CLOSE):,}",
+                  f"refused from {C.AFTER_CLOSE_FROM.strftime('%H:%M')} HKT, "
+                  f"once the auction can freeze"),
+            _tile("Cancellations - continuous", f"{_n(cxl, 'phase', 'CONTINUOUS'):,}",
+                  "on a continuous venue"),
+            _tile("Cancellations - close", f"{_n(cxl, 'phase', 'CLOSE'):,}",
+                  "on a CLOSE venue"),
+            _tile(C.CANCEL_AFTER_CLOSE.replace("_", " ").title(),
+                  f"{_n(cxl, 'cancel_type', C.CANCEL_AFTER_CLOSE):,}",
+                  f"cancelled from {C.AFTER_CLOSE_FROM.strftime('%H:%M')} HKT"),
         ]
         parts.append("<h2>Rejections and cancellations</h2>")
         parts.append(f'<div class="tiles">{"".join(rj_tiles)}</div>')

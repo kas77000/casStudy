@@ -77,7 +77,17 @@ python -m casretro                                    # yesterday, both flows
 python -m casretro --date 2026-08-04 --flow silk
 python -m casretro --mode rt --flow both              # intraday, RT tapes
 python -m casretro --no-market-data --formats csv     # skip the qatt queries
+python -m casretro --keep-no-close                    # see the misses too
 ```
+
+By default the report covers **close participants**: parents that executed
+something *and* sent a CLOSE-venue child order at or after 17:45 HKT. Both
+exclusions are printed and recorded in the run parameters.
+
+`--keep-no-close` puts the orders that never reached the auction back, which is
+the only way to get the non-participation waterfall (`NO_CLOSE_INSTRUCTION`,
+`FULLY_FILLED_BEFORE_CAS`, …) — those rules can only fire on orders the default
+excludes. `--keep-unfilled` does the same for orders that traded nothing.
 
 Output: `output/cas_retro_<date>_<flow>/` — CSVs, an `.xlsx`, and a
 self-contained HTML page.

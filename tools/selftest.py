@@ -24,6 +24,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from casretro import classify as CL         # noqa: E402
 from casretro import config as C            # noqa: E402
 from casretro import metrics as M           # noqa: E402
 from casretro import report as R            # noqa: E402
@@ -90,6 +91,13 @@ FILLS = {
 
 #: Scenarios that executed nothing: a real run must drop them.
 EXPECT_DROPPED = {tid for tid, (cont, close) in FILLS.items() if cont + close <= 0}
+
+#: Parents that get a CLOSE-venue child order in build_workorders(), all of them
+#: sent after 17:45 HKT.  Declared here rather than derived from the frame, so
+#: the filter is tested against the fixture's intent instead of against itself.
+#:   102 rejected in the auction, 110 cancelled, 111 stood but never matched,
+#:   and everything with a close fill.
+EXPECT_HAS_CLOSE_WO = {102, 110, 111} | {tid for tid, (_c, close) in FILLS.items() if close > 0}
 
 
 def build_universe() -> pd.DataFrame:
@@ -230,6 +238,19 @@ def build_workorders() -> pd.DataFrame:
                price=REF_PX * 0.985, time=t("17:53:00"),
                t_oes_send=t("17:53:00"), t_gen=t("17:52:59"),
                t_on_market=t("17:53:01"))
+        if tid == 101:      # two events after the random close began, so the
+                            # AFTER_CLOSE_* tags have something to catch. 101
+                            # still fills, so its participation is unchanged.
+            wo(id_target=tid, sym=sym, side=side, size=100,
+               venue="NSE_CLOSE", venuetype="CLOSE",
+               state="rejected:auction already frozen",
+               time=t("17:59:10"), t_oes_send=t("17:59:05"),
+               t_gen=t("17:59:04"), t_on_market=pd.NaT)
+            wo(id_target=tid, sym=sym, side=side, size=200,
+               venue="NSE_CLOSE", venuetype="CLOSE",
+               state="cxl:pulled after random close",
+               time=t("17:58:30"), t_oes_send=t("17:58:25"),
+               t_gen=t("17:58:24"), t_on_market=t("17:58:26"))
         if close > 0:       # traded in the auction
             # 101 goes in as a market order during the limit-and-market phase,
             # so both otype kinds show up in the mix tables.
@@ -449,11 +470,13 @@ def main() -> int:
     )
 
     note = ["synthetic data -- selftest only"]
-    # What a real run produces: only the orders that executed something.
+    # What a real run produces: close participants that executed something.
     data = assemble(DATE, "ht", "both", raw, note)
-    # The same book with the filter off, so every waterfall branch is still
-    # reachable -- several of them describe orders that never traded.
-    data_all = assemble(DATE, "ht", "both", raw, note, drop_unfilled=False)
+    # The same book with both filters off, so every waterfall branch is still
+    # reachable -- most of them describe orders that never reached the auction,
+    # which is precisely the population the default run excludes.
+    data_all = assemble(DATE, "ht", "both", raw, note,
+                        drop_unfilled=False, require_close_wo=False)
     R.print_console(data)
 
     outdir = args.out or tempfile.mkdtemp(prefix="cas_selftest_")
@@ -481,18 +504,28 @@ def main() -> int:
                 f"  id_target {tid}: reason {row['reason_code']!r}, expected {exp_reason!r}"
             )
 
-    # 2. the filter: everything that traded survives, everything else is gone
+    # 2. the two filters: a survivor traded something AND reached the auction
     kept = set(data.orders["id_target"])
-    expected_kept = {tid for tid, *_ in SCENARIOS} - EXPECT_DROPPED
+    all_ids = {tid for tid, *_ in SCENARIOS}
+    expected_kept = (all_ids - EXPECT_DROPPED) & EXPECT_HAS_CLOSE_WO
     if kept != expected_kept:
-        for tid in sorted(EXPECT_DROPPED & kept):
-            failures.append(f"  id_target {tid}: executed nothing but is still in the report")
+        for tid in sorted(kept - expected_kept):
+            why = ("executed nothing" if tid in EXPECT_DROPPED
+                   else "has no close-venue child order")
+            failures.append(f"  id_target {tid}: {why} but is still in the report")
         for tid in sorted(expected_kept - kept):
-            failures.append(f"  id_target {tid}: executed something but was dropped")
+            failures.append(f"  id_target {tid}: traded and reached the auction "
+                            f"but was dropped")
     if not data.orders.empty and float(data.orders["exec_qty"].min()) <= 0:
         failures.append("  a surviving parent order has exec_qty <= 0")
+    if not data.orders.empty and int((data.orders["n_close_wo"] <= 0).sum()):
+        failures.append("  a surviving parent order has no close child order")
+    if not data.orders.empty and "NOT_SENT" in set(data.orders["participation"]):
+        failures.append("  NOT_SENT survived the close-workorder filter")
 
-    rej = data.rejections
+    # 3. rejections and cancellations -- checked on the unfiltered book, since
+    #    the fixture's continuous ones sit on parents the close filter removes.
+    rej = data_all.rejections
     n_cont = int((rej["phase"] == "CONTINUOUS").sum()) if not rej.empty else 0
     n_close = int((rej["phase"] == "CLOSE").sum()) if not rej.empty else 0
     if n_cont < 1:
@@ -500,13 +533,49 @@ def main() -> int:
     if n_close < 1:
         failures.append("  no close-phase rejection was produced")
 
-    cxl = data.cancellations
+    # the time split is a separate dimension from the venue-based phase
+    n_plain = int((rej["rejection_type"] == C.REJECTION_PLAIN).sum()) if not rej.empty else 0
+    n_after = int((rej["rejection_type"] == C.REJECTION_AFTER_CLOSE).sum()) if not rej.empty else 0
+    if n_plain < 1:
+        failures.append(f"  no {C.REJECTION_PLAIN} was produced")
+    if n_after < 1:
+        failures.append(f"  no {C.REJECTION_AFTER_CLOSE} was produced")
+    if not rej.empty:
+        late = pd.to_timedelta(rej["time"], errors="coerce") >= t("17:58:00")
+        mism = int((late != (rej["rejection_type"] == C.REJECTION_AFTER_CLOSE)).sum())
+        if mism:
+            failures.append(f"  {mism} rejection(s) carry a rejection_type that "
+                            f"disagrees with their timestamp")
+    # and it must survive into the report the user actually reads
+    if data.rejections.empty or C.REJECTION_AFTER_CLOSE not in set(
+            data.rejections["rejection_type"]):
+        failures.append(f"  no {C.REJECTION_AFTER_CLOSE} survived the filters")
+
+    cxl = data_all.cancellations
     if cxl.empty or "price moved away" not in set(cxl["reason"]):
         failures.append("  the cxl:<reason> decoding did not produce 'price moved away'")
 
+    # cancellations carry the same 17:58 tag, and nothing is dropped on it
+    for label in (C.CANCEL_PLAIN, C.CANCEL_AFTER_CLOSE):
+        if cxl.empty or label not in set(cxl["cancel_type"]):
+            failures.append(f"  no {label} was produced")
+    if not cxl.empty:
+        late = pd.to_timedelta(cxl["time"], errors="coerce") >= t("17:58:00")
+        mism = int((late != (cxl["cancel_type"] == C.CANCEL_AFTER_CLOSE)).sum())
+        if mism:
+            failures.append(f"  {mism} cancellation(s) carry a cancel_type that "
+                            f"disagrees with their timestamp")
+    n_cxl_wo = int((CL.enrich_workorders(wo)["state_kind"] == CL.STATE_CANCELLED).sum())
+    if len(cxl) != n_cxl_wo:
+        failures.append(f"  cancellations were filtered: {len(cxl)} rows for "
+                        f"{n_cxl_wo} cancelled child orders - the tag must label, "
+                        f"not drop")
+
+    # 4. the mix tables -- also on the unfiltered book, so they can be compared
+    #    against the whole child-order fixture.
     for name, keys in (("mix_otype_basket", ["otype_kind", "basket"]),
                        ("mix_flow_venue_otype", ["flow", "venue", "otype_kind"])):
-        mix = getattr(data, name)
+        mix = getattr(data_all, name)
         if mix.empty:
             failures.append(f"  {name} came back empty")
             continue

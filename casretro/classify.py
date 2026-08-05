@@ -397,6 +397,26 @@ def summarise_fills(ex: pd.DataFrame) -> pd.DataFrame:
 # Close child-order footprint                                                  #
 # --------------------------------------------------------------------------- #
 
+def targets_with_close_workorder(wo: pd.DataFrame, after=None) -> set:
+    """id_targets owning at least one CLOSE-venue child order sent at/after `after`.
+
+    `send_time` is the stamp used: `enrich_workorders` already falls it back
+    t_oes_send -> t_transmit -> t_gen -> time, so it is the best available answer
+    to "when did this leave us".  A close child order carrying none of those
+    cannot be placed on either side of the cutoff, so it does not qualify --
+    `_build_reconciliation` reports how many there were rather than letting them
+    disappear quietly.
+    """
+    if wo is None or wo.empty or "is_close" not in wo.columns:
+        return set()
+    cw = wo[wo["is_close"]]
+    if cw.empty:
+        return set()
+    if after is not None:
+        cw = cw[pd.to_timedelta(cw["send_time"], errors="coerce") >= td(after)]
+    return set(cw["id_target"].dropna())
+
+
 def summarise_close_workorders(wo: pd.DataFrame) -> pd.DataFrame:
     """What we actually put into the auction, per parent."""
     if wo.empty:
@@ -654,6 +674,22 @@ def diagnose(orders: pd.DataFrame) -> pd.DataFrame:
 # Rejections & cancellations                                                   #
 # --------------------------------------------------------------------------- #
 
+def _after_close_tag(times, late_label: str, early_label: str) -> pd.Series:
+    """Label events either side of the random-close start.
+
+    Deliberately a *separate* dimension from the venue-derived `phase`: this one
+    is about the clock, and it never feeds the close/continuous split.  A null
+    timestamp cannot be placed, so it falls to the early label rather than being
+    quietly promoted.
+    """
+    t = pd.to_timedelta(times, errors="coerce")
+    return pd.Series(
+        np.where(t >= td(C.AFTER_CLOSE_FROM), late_label, early_label),
+        index=t.index if hasattr(t, "index") else None,
+        dtype=object,
+    )
+
+
 def rejections(wo: pd.DataFrame, ex: pd.DataFrame, orders: pd.DataFrame) -> pd.DataFrame:
     """Every rejected child order, tagged CONTINUOUS vs CLOSE.
 
@@ -710,12 +746,20 @@ def rejections(wo: pd.DataFrame, ex: pd.DataFrame, orders: pd.DataFrame) -> pd.D
         return pd.DataFrame(columns=[
             "source", "id_target", "id_work", "sym", "side", "time", "qty",
             "price", "venue", "otype", "raw_state", "reason", "is_close",
-            "bucket", "phase", "flow", "basket", "trader", "algo",
+            "bucket", "phase", "rejection_type", "flow", "basket", "trader", "algo",
         ])
 
     out = pd.concat(frames, ignore_index=True)
     # `phase` already arrives venue-derived from both source frames; re-deriving
     # it here is what used to let `event_phase` leak the clock back in.
+
+    # `rejection_type` is a deliberately *separate*, time-based dimension: from
+    # the random close onward the auction can freeze at any moment, so there may
+    # be no time left to correct a refusal and re-send.  It sits beside `phase`
+    # rather than feeding it -- `phase` stays venue-only.
+    out["rejection_type"] = _after_close_tag(
+        out["time"], C.REJECTION_AFTER_CLOSE, C.REJECTION_PLAIN
+    )
 
     # A refused child order usually lands twice: once as a `workorder.state` and
     # once as an execution report carrying the exchange's free text.  Counting
@@ -741,13 +785,13 @@ def cancellations(wo: pd.DataFrame, orders: pd.DataFrame) -> pd.DataFrame:
     if wo.empty:
         return pd.DataFrame(columns=[
             "id_target", "id_work", "sym", "side", "time", "qty", "venue",
-            "raw_state", "reason", "is_close", "phase",
+            "raw_state", "reason", "is_close", "phase", "cancel_type",
         ])
     cxl = wo[wo["state_kind"] == STATE_CANCELLED].copy()
     if cxl.empty:
         return pd.DataFrame(columns=[
             "id_target", "id_work", "sym", "side", "time", "qty", "venue",
-            "raw_state", "reason", "is_close", "phase",
+            "raw_state", "reason", "is_close", "phase", "cancel_type",
         ])
 
     out = pd.DataFrame({
@@ -764,6 +808,11 @@ def cancellations(wo: pd.DataFrame, orders: pd.DataFrame) -> pd.DataFrame:
         "bucket": S.session_of(pd.to_timedelta(cxl["time"], errors="coerce")),
         "phase": cxl["phase"],
     })
+    # Same 17:58 boundary and the same treatment as rejections: label, never
+    # drop, so the late ones can be counted without leaving the taxonomy.
+    out["cancel_type"] = _after_close_tag(
+        out["time"], C.CANCEL_AFTER_CLOSE, C.CANCEL_PLAIN
+    )
     return _attach_order_context(out, orders).sort_values(
         ["phase", "sym", "time"], ignore_index=True
     )
