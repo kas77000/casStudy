@@ -1,0 +1,51 @@
+nse_symbol,isin,name,weight_pct,asof,source
+RELIANCE,INE002A01018,Reliance Industries Ltd.,8.91,2026-08-04,smart-investing.in
+BHARTIARTL,INE397D01024,Bharti Airtel Ltd.,6.22,2026-08-04,smart-investing.in
+HDFCBANK,INE040A01034,HDFC Bank Ltd.,5.80,2026-08-04,smart-investing.in
+ICICIBANK,INE090A01021,ICICI Bank Ltd.,5.28,2026-08-04,smart-investing.in
+SBIN,INE062A01020,State Bank of India,4.86,2026-08-04,smart-investing.in
+TCS,INE467B01029,Tata Consultancy Services Ltd.,4.51,2026-08-04,smart-investing.in
+BAJFINANCE,INE296A01032,Bajaj Finance Ltd.,3.65,2026-08-04,smart-investing.in
+LT,INE018A01030,Larsen & Toubro Ltd.,2.81,2026-08-04,smart-investing.in
+HINDUNILVR,INE030A01027,Hindustan Unilever Ltd.,2.49,2026-08-04,smart-investing.in
+INFY,INE009A01021,Infosys Ltd.,2.41,2026-08-04,smart-investing.in
+SUNPHARMA,INE044A01036,Sun Pharmaceutical Industries Ltd.,2.39,2026-08-04,smart-investing.in
+MARUTI,INE585B01010,Maruti Suzuki India Ltd.,2.26,2026-08-04,smart-investing.in
+TITAN,INE280A01028,Titan Company Ltd.,2.23,2026-08-04,smart-investing.in
+M&M,INE101A01026,Mahindra & Mahindra Ltd.,2.16,2026-08-04,smart-investing.in
+ADANIENT,INE423A01024,Adani Enterprises Ltd.,2.08,2026-08-04,smart-investing.in
+KOTAKBANK,INE237A01036,Kotak Mahindra Bank Ltd.,1.99,2026-08-04,smart-investing.in
+AXISBANK,INE238A01034,Axis Bank Ltd.,1.99,2026-08-04,smart-investing.in
+ADANIPORTS,INE742F01042,Adani Ports and Special Economic Zone Ltd.,1.98,2026-08-04,smart-investing.in
+HCLTECH,INE860A01027,HCL Technologies Ltd.,1.87,2026-08-04,smart-investing.in
+ITC,INE154A01025,ITC Ltd.,1.82,2026-08-04,smart-investing.in
+ULTRACEMCO,INE481G01011,UltraTech Cement Ltd.,1.79,2026-08-04,smart-investing.in
+BAJAJFINSV,INE918I01026,Bajaj Finserv Ltd.,1.69,2026-08-04,smart-investing.in
+NTPC,INE733E01010,NTPC Ltd.,1.69,2026-08-04,smart-investing.in
+BAJAJ-AUTO,INE917I01010,Bajaj Auto Ltd.,1.62,2026-08-04,smart-investing.in
+JSWSTEEL,INE019A01038,JSW Steel Ltd.,1.60,2026-08-04,smart-investing.in
+ONGC,INE213A01029,Oil & Natural Gas Corporation Ltd.,1.55,2026-08-04,smart-investing.in
+ETERNAL,INE758T01015,Eternal Ltd.,1.53,2026-08-04,smart-investing.in
+BEL,INE263A01024,Bharat Electronics Ltd.,1.46,2026-08-04,smart-investing.in
+ASIANPAINT,INE021A01026,Asian Paints Ltd.,1.34,2026-08-04,smart-investing.in
+POWERGRID,INE752E01010,Power Grid Corporation of India Ltd.,1.34,2026-08-04,smart-investing.in
+COALINDIA,INE522F01014,Coal India Ltd.,1.30,2026-08-04,smart-investing.in
+SHRIRAMFIN,INE721A01047,Shriram Finance Ltd.,1.29,2026-08-04,smart-investing.in
+TATASTEEL,INE081A01020,Tata Steel Ltd.,1.21,2026-08-04,smart-investing.in
+HINDALCO,INE038A01020,Hindalco Industries Ltd.,1.16,2026-08-04,smart-investing.in
+EICHERMOT,INE066A01021,Eicher Motors Ltd.,1.11,2026-08-04,smart-investing.in
+GRASIM,INE047A01021,Grasim Industries Ltd.,1.08,2026-08-04,smart-investing.in
+INDIGO,INE646L01027,InterGlobe Aviation Ltd.,1.05,2026-08-04,smart-investing.in
+SBILIFE,INE123W01016,SBI Life Insurance Company Ltd.,0.95,2026-08-04,smart-investing.in
+WIPRO,INE075A01022,Wipro Ltd.,0.94,2026-08-04,smart-investing.in
+JIOFIN,INE758E01017,Jio Financial Services Ltd.,0.89,2026-08-04,smart-investing.in
+TRENT,INE849A01020,Trent Ltd.,0.83,2026-08-04,smart-investing.in
+TECHM,INE669C01036,Tech Mahindra Ltd.,0.82,2026-08-04,smart-investing.in
+APOLLOHOSP,INE437A01024,Apollo Hospitals Enterprise Ltd.,0.65,2026-08-04,smart-investing.in
+TMPV,INE155A01022,Tata Motors Passenger Vehicles Ltd.,0.65,2026-08-04,smart-investing.in
+CIPLA,INE059A01026,Cipla Ltd.,0.60,2026-08-04,smart-investing.in
+HDFCLIFE,INE795G01014,HDFC Life Insurance Company Ltd.,0.59,2026-08-04,smart-investing.in
+TATACONSUM,INE192A01025,Tata Consumer Products Ltd.,0.55,2026-08-04,smart-investing.in
+MAXHEALTH,INE027H01010,Max Healthcare Institute Ltd.,0.53,2026-08-04,smart-investing.in
+DRREDDY,INE089A01031,Dr. Reddy's Laboratories Ltd.,0.49,2026-08-04,smart-investing.in
+NESTLEIND,INE239A01024,Nestle India Ltd.,,,NSE constituent list - weight not published by the weight source
