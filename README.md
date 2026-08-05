@@ -365,13 +365,107 @@ casretro/
   report.py      console, CSV, Excel, HTML writers
   cli.py         argument parsing and orchestration
 tools/
-  selftest.py    synthetic end-to-end run, no database needed
+  selftest.py          synthetic end-to-end run, no database needed
+  dump_queries.py      print every q query without touching a database
+  bloomberg_nifty50.py NIFTY 50 members + weights   (Bloomberg machine)
+  map_nifty50_syms.py  resolve each member to a kdb sym   (kdb machine)
 config/
   instances.json host/port per instance
   cas_isins.txt  the CAS ISIN whitelist
+  nifty50.csv    NIFTY 50 members, weights and syms (generated, gitignored)
+docs/
+  queries.md     the generated query reference
 cas_price_move.py  standalone: price move between end of continuous and the close
 ```
 
 Queries are q lambdas with explicit parameters — nothing is interpolated into a
 query except table and column *names*, and syms/ids are pushed in chunks so a
 1500-name universe never builds a monster IPC message.
+
+---
+
+## 10. NIFTY 50 subset — `cas_price_move.py`
+
+`cas_price_move.py` measures the move between the end of continuous trading and
+the close. It now runs on the **NIFTY 50 subset** of the CAS universe and reports
+the reference price and the volume either side of the auction.
+
+### 10.1 Building the NIFTY 50 file
+
+Two scripts, because Bloomberg and kdb do not live on the same machine.
+
+**Step 1 — on the Bloomberg machine.** Needs a Terminal or B-PIPE session and
+either `xbbg` or `blpapi`; nothing else from this project, so the file can be
+copied over on its own.
+
+```bash
+python tools/bloomberg_nifty50.py --out config/nifty50.csv
+python tools/bloomberg_nifty50.py --date 2026-08-04       # that day's basket
+python tools/bloomberg_nifty50.py --index "NIFTY Index"   # or any other index
+```
+
+Weights come from `INDX_MWEIGHT_HIST` with an `END_DATE_OVERRIDE`. If that field
+returns nothing the script falls back to `INDX_MWEIGHT` — the *current* basket —
+and says so loudly, because a file labelled with a past date that quietly holds
+today's weights is worse than no file. It also pulls `ID_ISIN` per member, which
+is what makes step 2 reliable.
+
+**Step 2 — on the kdb machine.** Copy the file across, then:
+
+```bash
+python tools/map_nifty50_syms.py                        # config/nifty50.csv, in place
+python tools/map_nifty50_syms.py --equity-csv dump/equity.csv   # no kdb needed
+python tools/map_nifty50_syms.py --fail-on-unmatched    # for a scheduled run
+```
+
+It fills in `sym` and `sym_match_rule` using a waterfall, most reliable first:
+
+| rule | test |
+|---|---|
+| `isin` | `equity.ID_ISIN` == the member's ISIN |
+| `bbg_code` | `sym_blp` / `sym_blp_prm` / `sym_bpipe` == the member ticker |
+| `ticker_exch` | `TICKER` + `COMPOSITE_EXCH_CODE` |
+| `ticker` | `TICKER` alone, **only** when it resolves to one listing |
+
+`bbg_code` matters more than it looks: Bloomberg calls Infosys `INFO IN` while
+the sym is `INFY.IN`, so ticker matching alone would miss it.
+
+A member matching several listings (a dual `.IN`/`.IB` line) is resolved by
+`SYM_PREFERENCE` — `.IN` first, since the NIFTY 50 is an NSE index — and every
+candidate is written to `sym_candidates`, so the choice is visible. A member
+whose *ticker* is ambiguous is left **unmapped** rather than guessed, and listed
+on stderr for a manual fix.
+
+`config/nifty50*.csv` is gitignored: index weights are licensed Bloomberg data.
+
+### 10.2 What the price-move report now carries
+
+```bash
+python cas_price_move.py                      # NIFTY 50 subset of the CAS universe
+python cas_price_move.py --no-nifty-filter    # the whole CAS universe, as before
+python cas_price_move.py --print-query        # the q text, no connection needed
+```
+
+New columns, all from one query per sym chunk:
+
+| column | meaning |
+|---|---|
+| `closeRefPrice` | `size wavg price` over **17:30–17:45 HKT** (15:00–15:15 IST) — the exchange's CAS reference price |
+| `volRef`, `nRef` | volume and print count in that same window |
+| `volPost`, `nPost` | volume and print count from **17:50 HKT** to the end of the day |
+| `vwapPost` | VWAP over that post window |
+| `closeVsRefBps` | `pxClose` vs `closeRefPrice`, in bps — the ±3% band is ±300 bps, so this reads directly against it |
+| `weight_pct`, `bbg_ticker`, `name` | carried across from the NIFTY 50 file |
+
+The summary adds total volume either side of the auction, their ratio, an
+**index-weighted** mean move, and a count of names whose close printed outside
+the ±3% band.
+
+The window for `closeRefPrice` and `volRef` is half-open — `time >= 17:30:00.000,
+time < 17:45:00.000` — so a print exactly at 17:45:00.000 belongs to the close
+rather than to the reference VWAP. `volPost` has no upper bound.
+
+> **Fixed along the way:** the joins are now folded left one `lj` per statement.
+> Written `base lj pre lj cls`, q reads it right-to-left as `base lj (pre lj cls)`,
+> which drops `pxClose` for any sym that had a close print but no pre print — those
+> names were reported as `no_data` instead of `no_pre_price`.
