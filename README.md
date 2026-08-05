@@ -45,43 +45,21 @@ python -m casretro --check-config
 python -m casretro --check-config --mode rt
 ```
 
-### 2.3 When the universe comes back empty
-
-`fetch_universe` applies three predicates at once — the partition date, the
-`.IN/.IS/.IB` suffix filter and the ISIN whitelist — so an empty result never
-says which one is responsible. This runs them separately and counts:
-
-```bash
-python -m casretro --check-universe
-python -m casretro --check-universe --date 2026-08-04
-```
-
-```
-row counts, one predicate at a time
-  rows on that date                            12,431
-  + sym like *.IN/*.IS/*.IB                     1,905
-  + ID_ISIN in the whitelist (alone)                0
-  + both (what the report uses)                     0
-
-sample ID_ISIN on those rows:
-  INE002A01018, INE467B01029, ...
-  of those 10, 0 are in your whitelist
-```
-
-It ends with a verdict naming the culprit — a date with no partition, suffixes
-that match nothing, an unparsed ISIN file, or a whitelist whose ISINs are not the
-ones in `ID_ISIN`. It also lists the last five partitions of the database, so a
-date that simply is not loaded is obvious.
-
-To see the queries themselves, on any run:
+To watch the traffic itself, on any run:
 
 ```bash
 python -m casretro --show-queries 2> queries.log
 ```
 
-Every query that crosses the wire, with its arguments, elapsed time and result
-shape — including the `cols` schema probes. It goes to stderr so it can be split
-off from the report.
+Every query that crosses the wire — the `cols` schema probes included — with its
+arguments, elapsed time and result shape. It writes to stderr, so it can be split
+off from the report rather than interleaved with it.
+
+```
+[q #2] REF host:5010   14.3 ms  ->  1,905 rows x 13 cols
+        args: date=datetime.date(2026, 8, 4), SymbolVector[512]
+        {[d;isins] select sym, ID_ISIN, ... from equity where date=d, ((sym like "*.IN") | ...), ID_ISIN in isins }
+```
 
 ### 2.2 CAS universe — `config/cas_isins.txt`
 

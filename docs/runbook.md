@@ -206,7 +206,6 @@ constituent changes.
 | symptom | first thing to run |
 |---|---|
 | any kdb connection problem | `python -m casretro --check-config` |
-| **"the CAS universe came back empty"** | `python -m casretro --check-universe` |
 | you want to see every query sent | `python -m casretro --show-queries 2> queries.log` |
 | Bloomberg says a package is missing | `python tools/bloomberg_nifty50.py --diagnose` |
 | a Bloomberg pull fails | `python tools/bloomberg_check.py` — it names the failing stage |
