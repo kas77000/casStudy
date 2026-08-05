@@ -386,7 +386,7 @@ tools/
   selftest.py          synthetic end-to-end run, no database needed
   dump_queries.py      print every q query without touching a database
   nifty50_from_nse.py  NIFTY 50 members from NSE's public list (no Bloomberg)
-  bloomberg_nifty50.py NIFTY 50 members + free-float weights (Bloomberg machine)
+  bloomberg_nifty50.py NIFTY 50 members via blpapi           (Bloomberg machine)
   bloomberg_check.py   8-stage check that Bloomberg works    (Bloomberg machine)
   map_nifty50_syms.py  resolve each member to a kdb sym      (kdb machine)
 config/
@@ -434,18 +434,12 @@ It carries **ISIN**, which is the only key `map_nifty50_syms.py` matches on — 
 the universe half of the job is fully covered by a free, public file. Verified:
 50 members, 50 with an ISIN.
 
-What it does **not** carry is index weights; NSE publishes those only in the
-monthly factsheet PDF. Three ways to fill the column, most trustworthy first:
-
-| | what you get |
-|---|---|
-| `--weights-file FILE` | your own CSV with an ISIN (or symbol) column and a weight column — exact, if the file is |
-| `--weights-from-equity` | derived from `equity.CUR_MKT_CAP`. **Full** market cap, not free float, so promoter-heavy names come out too heavy. Labelled `EQUITY_CUR_MKT_CAP_APPROX` |
-| *(nothing)* | `weight_pct` left blank |
-
-Leaving it blank costs you exactly one thing: the index-weighted average line in
-`cas_price_move.py`. Filtering, the reference price, the volumes and every other
-column need only `sym`, which needs only ISIN.
+**Index weights are not collected.** NSE publishes them only in the monthly
+factsheet PDF, and anything derivable from the reference data we hold is full
+market cap rather than free float — an approximation dressed up as a fact. The
+report does not carry a weight column, so nothing needs one. `weight_pct` stays
+in the file schema and is passed through if a source supplies it; the column is
+simply written empty here.
 
 `--list-name` takes any NSE index file (`ind_nifty500list`,
 `ind_niftynext50list`, …). If the kdb box has no internet, download the CSV
@@ -453,9 +447,15 @@ anywhere and pass `--file`; that mode never touches the network.
 
 #### Route B — Bloomberg (`blpapi`)
 
-Use this when you want the **published free-float weights**. Needs a Terminal or
-B-PIPE session and `blpapi`. Copy `bloomberg_nifty50.py` and `bloomberg_check.py`
-across; they depend on nothing else in this project.
+Equivalent for the report's purposes — Route A is simpler and needs nothing
+licensed. Use this one if you already have a Terminal and would rather source the
+basket from Bloomberg, or if you want the published free-float weights in the
+file for something else. Needs a Terminal or B-PIPE session and `blpapi`. Copy
+`bloomberg_nifty50.py` and `bloomberg_check.py` across; they depend on nothing
+else in this project.
+
+The weights come along for free here: `INDX_MWEIGHT` *is* the member-list field,
+so the pull cannot drop them. They land in `weight_pct` and go unread.
 
 Check the setup first — it walks the same path one stage at a time, so a failure
 says *which* thing is broken:
@@ -552,11 +552,12 @@ New columns, all from one query per sym chunk:
 | `volPost`, `nPost` | volume and print count from **17:50 HKT** to the end of the day |
 | `vwapPost` | VWAP over that post window |
 | `closeVsRefBps` | `pxClose` vs `closeRefPrice`, in bps — the ±3% band is ±300 bps, so this reads directly against it |
-| `weight_pct`, `bbg_ticker`, `name` | carried across from the NIFTY 50 file |
+| `bbg_ticker`, `name` | carried across from the NIFTY 50 file |
 
-The summary adds total volume either side of the auction, their ratio, an
-**index-weighted** mean move, and a count of names whose close printed outside
-the ±3% band.
+No index weight is carried — see Route A above for why.
+
+The summary adds total volume either side of the auction, their ratio, and a
+count of names whose close printed outside the ±3% band.
 
 The window for `closeRefPrice` and `volRef` is half-open — `time >= 17:30:00.000,
 time < 17:45:00.000` — so a print exactly at 17:45:00.000 belongs to the close

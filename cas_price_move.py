@@ -180,10 +180,6 @@ def load_nifty50(path: str) -> pd.DataFrame:
         )
 
     resolved["sym"] = resolved["sym"].str.strip()
-    if "weight_pct" in resolved.columns:
-        resolved["weight_pct"] = pd.to_numeric(resolved["weight_pct"], errors="coerce")
-    else:
-        resolved["weight_pct"] = float("nan")
 
     unmapped = len(df) - len(resolved)
     if unmapped:
@@ -328,15 +324,20 @@ def build_report(
         for nb, na in zip(df["nPre"] > 0, df["nClose"] > 0)
     ]
 
+    # Index weights are deliberately not carried into the result: NSE only
+    # publishes them in a PDF, and everything derivable from the data we have is
+    # full market cap rather than free float, so the column would have been an
+    # approximation dressed up as a fact.  The NIFTY 50 file still carries
+    # `weight_pct` if its source supplied one -- nothing here reads it.
     if nifty is not None and not nifty.empty:
-        cols = [c for c in ("sym", "weight_pct", "bbg_ticker", "name") if c in nifty.columns]
+        cols = [c for c in ("sym", "bbg_ticker", "name") if c in nifty.columns]
         df = df.merge(nifty[cols], on="sym", how="left")
-    for col in ("weight_pct", "bbg_ticker", "name"):
+    for col in ("bbg_ticker", "name"):
         if col not in df.columns:
             df[col] = pd.NA
 
     return df[[
-        "date", "sym", "bbg_ticker", "name", "weight_pct", "status", "direction",
+        "date", "sym", "bbg_ticker", "name", "status", "direction",
         "pxPre", "tPre", "nPre",
         "pxClose", "tClose", "nClose",
         "closeRefPrice", "volRef", "nRef",
@@ -385,11 +386,6 @@ def print_summary(rep: pd.DataFrame, date: dt.date) -> None:
     print(f"  median move          : {bps.median():+.2f} bps")
     print(f"  mean |move|          : {bps.abs().mean():.2f} bps")
     print(f"  up / down / flat     : {(bps > 0).sum()} / {(bps < 0).sum()} / {(bps == 0).sum()}")
-
-    w = pd.to_numeric(ok.get("weight_pct"), errors="coerce")
-    if w is not None and w.notna().any() and w.sum():
-        print(f"  index-weighted move  : {(bps * w).sum() / w.sum():+.2f} bps"
-              f"   ({w.sum():.1f}% of the index covered)")
 
     ref_bps = pd.to_numeric(ok.get("closeVsRefBps"), errors="coerce")
     if ref_bps is not None and ref_bps.notna().any():
