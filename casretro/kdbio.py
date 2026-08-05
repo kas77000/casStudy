@@ -16,7 +16,9 @@ Two things this module exists to hide:
 from __future__ import annotations
 
 import datetime as dt
+import itertools
 import sys
+import time
 from contextlib import contextmanager
 from typing import Any, Iterable, Iterator, Sequence
 
@@ -38,6 +40,56 @@ except ImportError:  # pragma: no cover
 def require_pykx() -> None:
     if kx is None:  # pragma: no cover
         sys.exit("pykx is not installed -- run:  pip install pykx")
+
+
+# --------------------------------------------------------------------------- #
+# Query tracing                                                                #
+# --------------------------------------------------------------------------- #
+
+#: When on, every query that crosses the wire is written to stderr with its
+#: instance, arguments, elapsed time and result shape.  stderr rather than
+#: stdout so the trace can be split off:  ... --show-queries 2> queries.log
+TRACE_QUERIES = False
+
+_trace_seq = itertools.count(1)
+
+
+def set_trace_queries(on: bool) -> None:
+    global TRACE_QUERIES
+    TRACE_QUERIES = bool(on)
+
+
+def _describe_arg(a: Any) -> str:
+    """Type and length, so a 500-symbol vector does not print 500 symbols."""
+    name = type(a).__name__
+    if isinstance(a, (dt.date, dt.time, int, float, str, bool)):
+        return f"{name}={a!r}"
+    try:
+        return f"{name}[{len(a)}]"
+    except (TypeError, AttributeError):
+        return name
+
+
+def _trace(instance: C.Instance, expr: str, args: tuple, t0: float,
+           result: Any = None) -> None:
+    if not TRACE_QUERIES:
+        return
+    n = next(_trace_seq)
+    ms = (time.perf_counter() - t0) * 1000.0
+    shape = ""
+    if isinstance(result, pd.DataFrame):
+        shape = f"  ->  {len(result):,} rows x {len(result.columns)} cols"
+    elif result is not None:
+        shape = f"  ->  {type(result).__name__}"
+    argdesc = ", ".join(_describe_arg(a) for a in args) or "(no args)"
+
+    out = sys.stderr
+    print(f"\n[q #{n}] {instance.label} {instance.host}:{instance.port}"
+          f"   {ms:,.1f} ms{shape}", file=out)
+    print(f"        args: {argdesc}", file=out)
+    for line in str(expr).strip().splitlines():
+        print(f"        {line}", file=out)
+    out.flush()
 
 
 class Conn:
@@ -72,10 +124,14 @@ class Conn:
     # -- querying ----------------------------------------------------------- #
 
     def __call__(self, expr: str, *args: Any):
-        return self._conn(expr, *args)
+        t0 = time.perf_counter()
+        out = self._conn(expr, *args)
+        _trace(self.instance, expr, args, t0, None)
+        return out
 
     def query_pd(self, expr: str, *args: Any) -> pd.DataFrame:
         """Run a q expression returning a table, hand back a normalised frame."""
+        t0 = time.perf_counter()
         res = self._conn(expr, *args)
         try:
             df = res.pd()
@@ -83,12 +139,15 @@ class Conn:
             df = self._conn("0!", res).pd()
         if isinstance(df, pd.Series):
             df = df.to_frame()
-        return normalise(df.reset_index(drop=False) if df.index.names != [None] else df)
+        out = normalise(df.reset_index(drop=False) if df.index.names != [None] else df)
+        _trace(self.instance, expr, args, t0, out)
+        return out
 
     # -- introspection ------------------------------------------------------ #
 
     def columns_of(self, table: str) -> list[str]:
-        return [as_str(c) for c in self._conn(f"cols `{table}").py()]
+        # through __call__ so schema probes show up in the trace too
+        return [as_str(c) for c in self(f"cols `{table}").py()]
 
     def table_exists(self, table: str) -> bool:
         try:
