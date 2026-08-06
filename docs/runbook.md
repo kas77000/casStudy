@@ -6,6 +6,7 @@ different questions off the same tapes:
 | path | question | needs |
 |---|---|---|
 | A — `casretro` | what did **our orders** do in the auction? | §0.1, §0.2 |
+| A2 — `casretro_v2` | the same week, said to a **trader or a client** | §0.1, §0.2 |
 | B — `cas_price_move` | how far did prices move into the close? | + the NIFTY 50 file |
 | C — `casStudy` | what did the auction do to the **index**? | + index weights, whole-book universe |
 
@@ -99,10 +100,11 @@ tables are missing. **Do not skip this** — every later step assumes it passed.
 
 ```bash
 python tools/selftest.py             # Path A: the retrospective
+python tools/selftest_v2.py          # Path A2: the trader review
 python tools/selftest_casstudy.py    # Path C: the index study
 ```
 
-Both run the whole analytical layer on synthetic frames — no kdb, no pykx
+Each runs its whole analytical layer on synthetic frames — no kdb, no pykx
 connection. Run the matching one after any change to the rules it guards.
 
 ---
@@ -113,7 +115,6 @@ Needs §0.1 and §0.2. **Nothing else. No NIFTY file.**
 
 ```bash
 python -m casretro                                    # yesterday, both flows
-python -m casretro --weekly                           # Monday to today
 python -m casretro --date 2026-08-04 --flow silk
 python -m casretro --mode rt --flow both              # intraday, RT tapes
 python -m casretro --no-market-data --formats csv     # skip the qatt queries
@@ -129,82 +130,77 @@ the only way to get the non-participation waterfall (`NO_CLOSE_INSTRUCTION`,
 `FULLY_FILLED_BEFORE_CAS`, …) — those rules can only fire on orders the default
 excludes. `--keep-unfilled` does the same for orders that traded nothing.
 
-Output: `output/cas_retro_<date>_<flow>/` — CSVs, an `.xlsx`, and **two**
-self-contained HTML pages:
-
-| file | for | what is on it |
-|---|---|---|
-| `cas_retro_<date>_<flow>.html` | the desk, quant | every section, every column, every row, plus the reconciliation checks |
-| `cas_retro_<date>_<flow>_trader.html` | traders, clients | four questions and then it stops — plain English, IST clocks, ₹ in crore/lakh, no order ids and no reason codes |
-
-Drop either with `--formats`: `html` is the quant page, `trader` the client one.
+Output: `output/cas_retro_<date>_<flow>/` — CSVs, an `.xlsx`, and a
+self-contained HTML page for the desk.
 
 **Read `reconciliation` first.** Any row that is not `OK` means a number
-elsewhere in the report is suspect, and it says which. The trader page says so
-too, at the top, in a sentence — so a page that goes out never hides a failed
-check.
+elsewhere in the report is suspect, and it says which.
 
-### A — the Friday review
+> **One day.** `casretro` answers for a single date. The weekly review — and the
+> version that goes to a trader or a client — is Path A2 below, which owns the
+> period logic and decides which tape each day comes from.
 
-Run at the end of the week, after Friday's close:
+---
 
-```bash
-python -m casretro --weekly
-```
+## Path A2 — the trader review (`casretro_v2`)
 
-That runs the same pipeline once per business day from Monday up to today, folds
-the days into one report, and writes both HTML pages for the week. The anchor is
-**today**, not the last business day, precisely so a Friday-evening run includes
-Friday. Reviewing last week on the Monday after, name the Friday:
+Same tapes, same period logic, a different page. `casretro` is the desk's own
+worksheet; **`casretro_v2` is the one that goes to the floor and to clients**,
+and it has three sections and stops.
 
 ```bash
-python -m casretro --weekly --date 2026-08-07
-python -m casretro --from 2026-07-27 --to 2026-08-07 --per-day   # any range
+python -m casretro_v2                                  # Monday to today
+python -m casretro_v2 --from 2026-07-27 --to 2026-08-07
+python -m casretro_v2 --date 2026-08-04                # one day
+python -m casretro_v2 --flow silk --fx divide
 ```
 
-Each day comes off the tape that actually has it:
+Weekly by default — every chart is one bar per day, so a period is the natural
+unit and a single day is just a period of length one. Dates, the business-day
+calendar and the live-day HT/RT rule live in `casretro_v2/days.py`, the only
+place in the repo that knows what a week is.
 
-| run on | days | source |
-|---|---|---|
-| Thursday | Mon–Wed / **Thu** | HT / **RT** |
-| Friday, after the close | Mon–Thu / **Fri** | HT / **RT** |
-| Saturday or Sunday | Mon–Thu / **Fri** | HT / **RT** |
-| the Monday after | Mon–Fri | HT — RT is never opened |
+| section | what is on it |
+|---|---|
+| **Execution Quality** | one stacked bar per day, per order type: quantity sent to the auction split into executed and not, with the fill ratio labelled on the bar and both notionals in USD in the table |
+| **Flows** | one row per day × flow × type: orders, child orders, notional traded in the close, fill rate, distinct symbols, and the market's own close volume and notional in those same names |
+| **Top 5 clients** | the biggest baskets of each flow by notional traded in the close — SILK and Agency as separate tables when the run is `--flow both` |
 
-The **live day** — the most recent business day — is read from the RT tapes,
-because the HDB has usually not written it down yet. If the tapes have already
-handed it over, the run falls back to HT and everything comes from there, so the
-same command works on either side of the write-down. A past day is never read
-from RT: the tape holds whatever it holds *now*, and would be stamped with a date
-it does not belong to.
+**How things are priced.** Executed quantity at the fill price off the execution
+table. Unfilled quantity at the child order's own price off the workorder — and
+for a market order, which carries no price to be unfilled at, at the auction's
+closing price. The page reports how much of the total rests on that substitution
+rather than burying it.
 
-The `by_day` table's `source` column says which tape served each day, and the
-report's mode reads `ht+rt` when a week mixes them. `--rt-today off` keeps it on
-the HDB entirely; `--rt-today force` disables the fallback.
+**The market side**, from `qatt`, per symbol per day:
 
-> The RT order tables get no date predicate server-side, so the day is enforced
-> row by row after loading. The `qatt` queries aggregate server-side and cannot
-> be filtered afterwards — when the live day's market data comes off an RT tape,
-> both HTML pages say so.
+| number | window |
+|---|---|
+| close volume | every print from **17:50 HKT** (15:20 IST) to end of day |
+| close price | the **first** print between **17:58 and 18:00 HKT** (15:28–15:30 IST) — where the auction freezes |
 
-What to know before quoting a weekly number:
+Market notional is close volume × close price, so our share is a ratio of two
+numbers struck on the same price. The denominator on any row covers **only the
+symbols that row traded**, which means rows sharing a name overlap and the market
+notional column does **not** add up down the page; the Period row is recomputed
+over the period's distinct symbols rather than summed. The page says this under
+the table.
 
-* a day with no parent order — a holiday, nothing traded, or a day that is on
-  neither tape — is **dropped, not counted as a zero**, and named in the
-  warnings. Check that line first: five days in the range does not mean five days
-  in the numbers;
-* quantities and counts are summed; **every percentage is recomputed from the
-  summed quantities**, so a quiet Monday does not weigh the same as a heavy
-  Friday;
-* close capture is weighted by the size that actually traded in the auction;
-* the new `by_day` section, and the charts above it, are the point of the
-  exercise — one bad print and a habit look identical on a single day;
-* `--per-day` also writes each day's own report under `<out>/days/<date>/`;
-* `--mode rt` is refused here: it would put *every* day on the tapes, which carry
-  no date, so every day would return the same rows. The live day already comes
-  from RT without it.
+**USD.** `equity.fx_last` is a *daily* column, so every day is converted at its
+own rate, read from that day's `equity` partition — never one snapshot's rate
+applied to a whole week. A universe CSV is still used for the sym list. The
+direction of the quote is undocumented in the schema but recoverable: for a
+currency far from parity the two candidate quotes are reciprocals on opposite
+sides of 1, so the magnitude names the direction and both readings land on the
+same USD figure. `--fx divide|multiply` forces it; the rate actually used is
+printed on the page.
 
-Output: `output/cas_retro_week_<start>_<end>_<flow>/`.
+Output: `output/cas_v2_<start>_<end>_<flow>/` — the HTML page and the CSVs behind
+every number on it.
+
+```bash
+python tools/selftest_v2.py     # the whole thing on synthetic frames, no kdb
+```
 
 ---
 
@@ -381,7 +377,7 @@ python casStudy.py --append-panel     # Path C
 And once a week, on Friday after the close:
 
 ```bash
-python -m casretro --weekly           # Path A, Monday to Friday in one report
+python -m casretro_v2                 # Path A2, the week that goes out
 ```
 
 The NIFTY 50 file is static between index rebalances — NSE reviews
@@ -401,9 +397,9 @@ because a missed rebalance corrupts every weighted number silently.
 | Bloomberg says a package is missing | `python tools/bloomberg_nifty50.py --diagnose` |
 | a Bloomberg pull fails | `python tools/bloomberg_check.py` — it names the failing stage |
 | a number looks wrong | the `reconciliation` sheet of the retrospective |
-| a weekly number looks wrong | the `by_day` sheet — which day moved it, which tape it came off, and is a day missing |
+| a weekly number looks wrong | `csv/flows.csv` — which day moved it, and is a day missing |
 | the live day is missing from a weekly run | is an `oms` `rt` instance configured and reachable? `--check-config --mode rt` |
-| you changed the weekly roll-up or either HTML page | `python tools/selftest.py` |
+| you changed anything in `casretro_v2` | `python tools/selftest_v2.py` |
 | you want to audit a query | `python tools/dump_queries.py --out docs/queries.md` |
 | the price-move query specifically | `python cas_price_move.py --print-query` |
 | the index-study query specifically | `python casStudy.py --print-query` |

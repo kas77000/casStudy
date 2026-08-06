@@ -67,29 +67,6 @@ class ReportData:
     sessions: pd.DataFrame
     warnings: list[str] = field(default_factory=list)
 
-    #: One row per trading day.  Empty on a single-day run; a weekly run fills it
-    #: in (see `weekly.combine_days`) and every writer picks it up from there.
-    by_day: pd.DataFrame = field(default_factory=pd.DataFrame)
-
-    #: Every date the report covers.  Empty on a single-day run -- `date` alone
-    #: says it.  A weekly run lists the days that actually produced data, so a
-    #: holiday in the middle is visible rather than silently averaged over.
-    dates: list[dt.date] = field(default_factory=list)
-
-    @property
-    def period_label(self) -> str:
-        """'2026-08-03' / '2026-08-03 to 2026-08-07' / 'real time'."""
-        if self.dates:
-            first, last = self.dates[0], self.dates[-1]
-            if first != last:
-                return f"{first.isoformat()} to {last.isoformat()}"
-            return first.isoformat()
-        return self.date.isoformat() if self.date else "real time"
-
-    @property
-    def is_weekly(self) -> bool:
-        return len(self.dates) > 1
-
 
 # --------------------------------------------------------------------------- #
 # Helpers                                                                      #
@@ -106,33 +83,6 @@ def _as_td(df: pd.DataFrame, cols) -> None:
     for c in cols:
         if c in df.columns:
             df[c] = pd.to_timedelta(df[c], errors="coerce")
-
-
-def clip_to_date(df: pd.DataFrame, date: dt.date | None) -> tuple[pd.DataFrame, int]:
-    """Drop rows belonging to another date.  Returns (frame, rows dropped).
-
-    Only ever needed on a **non-partitioned** instance: `kdbio.where_date` emits
-    no date predicate there, so the server hands back whatever the tape holds.
-    That is the intended behaviour intraday -- the RT tape *is* today -- but a
-    weekly run reads one specific day from those tapes and has to be sure it got
-    that day and nothing else.
-
-    A tape with no `date` column at all cannot be clipped; the caller reports
-    that rather than assuming it was clean.
-    """
-    if df is None or df.empty or date is None or "date" not in df.columns:
-        return df, 0
-    try:
-        seen = pd.to_datetime(df["date"], errors="coerce").dt.date
-    except (TypeError, ValueError, AttributeError):  # pragma: no cover
-        return df, 0
-    if seen.isna().all():
-        return df, 0
-    keep = seen == date
-    dropped = int((~keep).sum())
-    if not dropped:
-        return df, 0
-    return df[keep].reset_index(drop=True), dropped
 
 
 def _without_ids(df: pd.DataFrame, ids: set) -> pd.DataFrame:
@@ -155,7 +105,6 @@ def load_frames(
     skip_market_data: bool = False,
     universe_csv=C.UNIVERSE_FILE_CANDIDATES,
     use_universe_csv: bool = True,
-    enforce_date: bool = False,
     verbose: bool = True,
 ) -> tuple[RawFrames, list[str]]:
     warnings: list[str] = []
@@ -182,22 +131,7 @@ def load_frames(
 
     # -- parent orders ------------------------------------------------------ #
     oms = pool.get("oms")
-
-    # On a non-partitioned instance the server was sent no date predicate, so
-    # anything the tape happens to hold came back.  A weekly run asked for one
-    # specific day and says so here.
-    clip = enforce_date and not oms.instance.partitioned
-
-    def _clip(df: pd.DataFrame, what: str) -> pd.DataFrame:
-        if not clip:
-            return df
-        out, dropped = clip_to_date(df, date)
-        if dropped:
-            say(f"[info] {what}: {dropped} row(s) from another date dropped "
-                f"({oms.instance.label} is not partitioned)")
-        return out
-
-    targets = _clip(L.load_targets(oms, date, syms), "targets")
+    targets = L.load_targets(oms, date, syms)
     if targets.empty:
         warnings.append("no parent order touched the CAS universe on this date")
         say("[warn] no targets found")
@@ -208,10 +142,10 @@ def load_frames(
 
     ids = sorted(targets["id_target"].dropna().astype(int).unique()) if not targets.empty else []
 
-    states = _clip(L.load_target_states(oms, date, ids), "states") if ids else pd.DataFrame()
-    wo_raw = _clip(L.load_workorders(oms, date, ids), "workorders") if ids else pd.DataFrame()
-    ex_raw = _clip(L.load_executions(oms, date, ids), "executions") if ids else pd.DataFrame()
-    alerts = _clip(L.load_alerts(oms, date, ids), "alerts") if ids else pd.DataFrame()
+    states = L.load_target_states(oms, date, ids) if ids else pd.DataFrame()
+    wo_raw = L.load_workorders(oms, date, ids) if ids else pd.DataFrame()
+    ex_raw = L.load_executions(oms, date, ids) if ids else pd.DataFrame()
+    alerts = L.load_alerts(oms, date, ids) if ids else pd.DataFrame()
     say(
         f"[info] states={len(states)} workorders={len(wo_raw)} "
         f"executions={len(ex_raw)} alerts={len(alerts)}"
@@ -229,17 +163,6 @@ def load_frames(
 
     try:
         qatt = pool.get("qatt")
-        if enforce_date and not qatt.instance.partitioned:
-            # Every qatt query aggregates server-side, so there is no row-level
-            # date to clip afterwards.  Said out loud rather than assumed away:
-            # if that tape holds more than the requested day, the volume shares
-            # and the reference price are measuring more than the day.
-            warnings.append(
-                f"market data for {date} came from {qatt.instance.label}, which "
-                f"is not partitioned: the queries carry no date predicate and "
-                f"aggregate server-side, so these figures are only this day's if "
-                f"that tape holds only this day"
-            )
         profile = L.load_volume_profile(qatt, date, syms)
         raw.profile_wide = M.pivot_market_profile(profile)
 
@@ -421,14 +344,13 @@ def build_report(
     use_universe_csv: bool = True,
     drop_unfilled: bool = C.DROP_UNFILLED_ORDERS,
     require_close_wo: bool = C.REQUIRE_CLOSE_WORKORDER,
-    enforce_date: bool = False,
     verbose: bool = True,
 ) -> ReportData:
     raw, warnings = load_frames(
         pool, date, flow, isins=isins,
         skip_market_data=skip_market_data,
         universe_csv=universe_csv, use_universe_csv=use_universe_csv,
-        enforce_date=enforce_date, verbose=verbose,
+        verbose=verbose,
     )
     data = assemble(
         date, pool.mode, flow, raw, warnings,

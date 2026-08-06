@@ -1,0 +1,122 @@
+"""The market side: what the whole auction did, per symbol per day -- and the
+day's FX rate.
+
+The two market numbers come out of `casretro.loaders.load_window_stats` -- an
+audited, parameterised query that aggregates server-side -- so no new q text is
+introduced for them and `tools/dump_queries.py` still describes everything that
+crosses the wire.
+
+    close volume  every print from 17:50 HKT to end of day
+    close price   the FIRST print in 17:58-18:00 HKT
+
+`load_fx` is the one genuinely new query, and it exists because `fx_last` is a
+**daily** column on `equity`.  A week converted at one snapshot's rate is a week
+of notionals struck on the wrong day; every day gets its own partition read.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from typing import Sequence
+
+import pandas as pd
+
+from casretro import config as C
+from casretro import kdbio as K
+from casretro import loaders as L
+from casretro import universe as U
+
+from . import config as V
+
+#: What the market frame is keyed on and carries.
+MARKET_COLS = ["sym", "mkt_close_qty", "mkt_close_notional_local",
+               "mkt_close_px", "mkt_close_px_time"]
+
+#: The reference columns the FX rate needs, and nothing else.
+FX_COLS = ["sym", "CRNCY", "fx_last"]
+
+
+def load_fx(
+    conn: K.Conn, date: dt.date | None, syms: Sequence[str]
+) -> pd.DataFrame:
+    """That day's `fx_last` and currency per sym, straight off `equity`.
+
+    `equity` is date-partitioned, so this is the rate as it stood on the day
+    being reported.  It is read per day and never carried across days: a weekly
+    report converted at Friday's rate would restate Monday's notionals at a
+    price nobody traded on.
+
+    Deliberately narrow -- three columns, no `adv`, no `px_last_prev` -- because
+    the sym list has usually already come from a snapshot and this is the only
+    thing that has to be fresh.
+    """
+    inst = conn.instance
+    tbl = inst.table("equity")
+    where_d = K.where_date(inst)
+    have = set(conn.columns_of(tbl))
+    cols = [c for c in FX_COLS if c in have]
+    if "sym" not in cols:
+        return pd.DataFrame(columns=FX_COLS)
+
+    sig = "d;syms" if inst.partitioned else "syms"
+    qry = (f"{{[{sig}] select {', '.join(cols)} from {tbl} "
+           f"where {where_d}sym in syms }}")
+
+    frames = []
+    for chunk in K.chunks(list(syms), C.SYM_CHUNK):
+        frames.append(conn.query_pd(qry, *K.date_params(inst, date), K.sym_vector(chunk)))
+    df = K.concat(frames)
+    if df.empty:
+        return pd.DataFrame(columns=FX_COLS)
+    if "fx_last" in df.columns:
+        df["fx_last"] = pd.to_numeric(df["fx_last"], errors="coerce")
+    return df.drop_duplicates(subset=["sym"]).reset_index(drop=True)
+
+
+def load_market(
+    conn: K.Conn, date: dt.date | None, syms: Sequence[str]
+) -> pd.DataFrame:
+    """Per sym: close volume, close price, and the notional the two imply.
+
+    `mkt_close_notional_local` is close volume x close price, not the window's
+    own traded notional: the point of comparison is our close notional against
+    the auction valued at the auction's price, so both sides are struck on the
+    same price.  The window's own VWAP is carried too, for anyone who wants to
+    see how far the two differ.
+    """
+    vol = L.load_window_stats(
+        conn, date, syms, V.CLOSE_VOLUME_FROM, V.DAY_END, prefix="clsvol_"
+    )
+    px = L.load_window_stats(
+        conn, date, syms, V.CLOSE_PRICE_WINDOW[0], V.CLOSE_PRICE_WINDOW[1],
+        prefix="clspx_",
+    )
+
+    if vol is None or vol.empty:
+        vol = pd.DataFrame(columns=["sym"])
+    if px is None or px.empty:
+        px = pd.DataFrame(columns=["sym"])
+
+    out = vol.merge(px, on="sym", how="outer") if not px.empty else vol
+    if out.empty:
+        return pd.DataFrame(columns=MARKET_COLS)
+
+    out = out.rename(columns={
+        "clsvol_qty": "mkt_close_qty",
+        "clsvol_vwap": "mkt_close_vwap",
+        "clsvol_n": "mkt_close_prints",
+        "clspx_pxFirst": "mkt_close_px",
+        "clspx_tFirst": "mkt_close_px_time",
+        "clspx_n": "mkt_auction_prints",
+    })
+    for col in ("mkt_close_qty", "mkt_close_px", "mkt_close_vwap"):
+        if col not in out.columns:
+            out[col] = float("nan")
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    if "mkt_close_px_time" not in out.columns:
+        out["mkt_close_px_time"] = pd.NaT
+
+    out["mkt_close_notional_local"] = out["mkt_close_qty"] * out["mkt_close_px"]
+    keep = MARKET_COLS + [c for c in ("mkt_close_vwap", "mkt_close_prints",
+                                      "mkt_auction_prints") if c in out.columns]
+    return out[[c for c in keep if c in out.columns]].reset_index(drop=True)
