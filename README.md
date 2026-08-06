@@ -13,7 +13,7 @@ Everything is **HKT** — the raw `time` columns of the tables. IST = HKT − 02
 
 | run | answers | read |
 |---|---|---|
-| `python -m casretro` | **Our orders.** Which parent orders made it into the auction, which did not and why, what got rejected, how our volume sat against the desk benchmarks. | §5 |
+| `python -m casretro` | **Our orders.** Which parent orders made it into the auction, which did not and why, what got rejected, how our volume sat against the desk benchmarks. One day, or a whole week with `--weekly`. | §5 |
 | `python cas_price_move.py` | **The move.** How far price travelled between the end of continuous and the close, per name, with the CAS reference price and the volume either side. | §10.2 |
 | `python casStudy.py` | **The effect.** What CAS did to the NIFTY 50 versus the old closing rule, with non-CAS names as a control arm. | [`docs/cas_study_method.md`](docs/cas_study_method.md) |
 
@@ -189,8 +189,11 @@ one command.
 ## 3. Run
 
 ```bash
-# yesterday, both flows, CSV + Excel + HTML into output/
+# yesterday, both flows, CSV + Excel + both HTML pages into output/
 python -m casretro
+
+# the Friday review: Monday to today, rolled up into one report
+python -m casretro --weekly
 
 # one flow, one date
 python -m casretro --date 2026-08-03 --flow silk
@@ -239,6 +242,90 @@ answers.
 
 Output lands in `output/cas_retro_<date>_<flow>/`.
 
+### The Friday review — a week instead of a day
+
+```bash
+python -m casretro --weekly                        # Monday to today
+python -m casretro --weekly --date 2026-08-07      # that Friday's week
+python -m casretro --from 2026-07-27 --to 2026-08-07 --per-day
+```
+
+`--weekly` runs the identical pipeline once per business day from Monday up to
+`--date`, then folds the results into one report. The anchor defaults to
+**today**, not to the last business day: the review is run after Friday's close
+and has to include Friday.
+
+A day that produced no parent order — a holiday, or simply nothing traded — is
+**dropped, not folded in as a zero**, and named in the warnings. The roll-up
+rules are worth knowing because they decide what the numbers mean:
+
+| what | how the week is built |
+|---|---|
+| quantities, order and rejection counts | summed |
+| every percentage and share | **recomputed from the summed quantities** — never an average of five daily percentages, which would weight a quiet Monday like a heavy Friday |
+| close capture | weighted by the size that actually traded in the auction |
+| per-symbol stats | summed per name, with `n_days` saying how many days it appeared |
+| the mix tables | rebuilt from each day's own child-order frame, so a `id_target` that repeats across days is never collapsed into one parent |
+| `by_day` | a new section, one row per trading day — the trend a single day cannot show |
+
+`--per-day` also writes each day's own standalone report under
+`<out>/days/<date>/`. Output lands in
+`output/cas_retro_week_<start>_<end>_<flow>/`.
+
+#### Which tape each day comes from
+
+The **live day** — the most recent business day, so Thursday on a Thursday run
+and Friday on a Friday, Saturday or Sunday run — has usually not been written
+down to the HDB yet. It is read from the **RT tapes**; every earlier day is read
+from the **HDB**, always.
+
+| run on | days | source |
+|---|---|---|
+| Thursday | Mon–Wed / **Thu** | HT / **RT** |
+| Friday, after the close | Mon–Thu / **Fri** | HT / **RT** |
+| Saturday or Sunday | Mon–Thu / **Fri** | HT / **RT** |
+| the Monday after | Mon–Fri | HT — RT is never opened |
+
+If the tapes have already handed the day over, the run **falls back to the HDB**
+and everything comes from HT — the same command works on either side of the
+write-down. `--rt-today force` disables that fallback (a rolled tape then shows
+as a missing day rather than being quietly served from the HDB); `--rt-today
+off` never reaches for the tapes at all.
+
+A past day is **never** read from RT. A real-time tape holds whatever it holds
+*now*, so serving `--weekly --date <last Friday>` from it would stamp today's
+session with last Friday's date. Only the live day is ever eligible.
+
+Two safeguards, because the RT tables are not partitioned and get no date
+predicate server-side:
+
+* the order tables are filtered **row by row** on their `date` column after
+  loading, so a tape holding more than one session cannot bleed into the day —
+  and a tape that has rolled comes back empty, which is what triggers the
+  handover to HT;
+* the `qatt` queries aggregate server-side, so there is no row left to filter.
+  When the live day's market data comes off the RT tape the report says so, in
+  the warnings and on both HTML pages.
+
+Which source served each day is in the `by_day` table's `source` column, and the
+combined report's mode reads `ht+rt` when a week mixes them.
+
+`--mode rt` is still refused for a multi-day run: it would put *every* day on the
+tapes, and since they carry no date, every day would return the same rows.
+
+### Two pages, two readers
+
+Every run writes two self-contained HTML files. Same numbers, different question.
+
+| file | for | what is on it |
+|---|---|---|
+| `<base>.html` | the desk, quant | everything: every section, every column, every row, the reconciliation checks, the reason codes. The worksheet a number gets traced in. |
+| `<base>_trader.html` | traders, clients | four questions and then it stops — did we get into the close, what did it cost, what kept us out, which names does that leave. Plain English, IST clocks, ₹ in crore/lakh, no `id_target`, no reason codes. |
+
+The trader page states nothing the pipeline did not compute, and where a figure
+is unavailable it says so rather than printing a zero. `--formats` controls both:
+`html` is the quant page, `trader` the client one, and either can be dropped.
+
 ### Running without a database
 
 ```bash
@@ -246,9 +333,12 @@ python tools/selftest.py
 ```
 
 Builds synthetic frames matching the real schemas, runs the whole analytical
-layer and the three writers, and asserts that every branch of the
-non-participation waterfall fires. Use it to see the report shape before pointing
-at kdb, and as a regression test after changing the classification rules.
+layer and every writer, and asserts that each branch of the non-participation
+waterfall fires. It also rolls a three-day week out of the same fixture and
+checks that quantities came to exactly three times the day while every share came
+back unchanged, and that the trader page leaks none of the pipeline's vocabulary.
+Use it to see the report shape before pointing at kdb, and as a regression test
+after changing the classification or roll-up rules.
 
 ---
 
@@ -545,7 +635,9 @@ casretro/
   classify.py    state parsing, close participation, the "why not" waterfall
   metrics.py     reference price, price band, volume share, slippage, timing
   build.py       load_frames() talks to kdb; assemble() is pure pandas
-  report.py      console, CSV, Excel, HTML writers
+  weekly.py      business days in, one week-wide report out; pure pandas
+  report.py      console, CSV, Excel and the quant HTML page
+  trader.py      the trader / client HTML page
   cli.py         argument parsing and orchestration
 tools/
   selftest.py          synthetic end-to-end run, no database needed

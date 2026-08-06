@@ -28,9 +28,17 @@ from casretro import classify as CL         # noqa: E402
 from casretro import config as C            # noqa: E402
 from casretro import metrics as M           # noqa: E402
 from casretro import report as R            # noqa: E402
-from casretro.build import RawFrames, assemble  # noqa: E402
+from casretro import trader as T            # noqa: E402
+from casretro import weekly as W            # noqa: E402
+from casretro.build import RawFrames, assemble, clip_to_date  # noqa: E402
 
 DATE = dt.date(2026, 8, 3)
+
+#: The week the weekly roll-up is checked against: Monday to Wednesday of the
+#: same week as DATE.  Every day is built from the *same* fixture, which is what
+#: makes the roll-up assertions exact -- a three-day week has to come to three
+#: times the day, and any percentage has to come back unchanged.
+WEEK_DATES = [DATE, DATE + dt.timedelta(days=1), DATE + dt.timedelta(days=2)]
 
 
 def t(s: str) -> pd.Timedelta:
@@ -444,6 +452,233 @@ def check_venue_only() -> list[str]:
     return out
 
 
+def check_day_sources() -> list[str]:
+    """Which tape each day of the week is read from, for every day it is run on.
+
+    Pure scheduling logic, so it is checked without a database.  The failure it
+    guards is silent in production: a Friday review that misses Friday because
+    the HDB has not written it down, or -- worse -- a review of last week that
+    stamps today's real-time tape with last Friday's date.
+    """
+    out: list[str] = []
+    fri = dt.date(2026, 8, 7)
+    week = W.week_of(dt.date(2026, 8, 8))          # run on the Saturday
+    if week != [fri - dt.timedelta(days=i) for i in range(4, -1, -1)]:
+        out.append(f"  sources: a Saturday run covers {week[0]}..{week[-1]}, "
+                   f"expected the Mon-Fri that just closed")
+
+    def sources(day, today, policy="auto", rt=True):
+        return W.sources_for_day(day, today, rt_available=rt, policy=policy)
+
+    # Friday, Saturday and Sunday all treat Friday as the live day: the RT tapes
+    # have not rolled into a new session yet.
+    for today in (fri, fri + dt.timedelta(days=1), fri + dt.timedelta(days=2)):
+        if sources(fri, today) != ("rt", "ht"):
+            out.append(f"  sources: run on {today:%a}, Friday reads "
+                       f"{sources(fri, today)} -- expected RT then HT")
+        for earlier in week[:-1]:
+            if sources(earlier, today) != ("ht",):
+                out.append(f"  sources: run on {today:%a}, {earlier:%a} reads "
+                           f"{sources(earlier, today)} -- only the live day may "
+                           f"come off RT")
+
+    # Mid-week is the same shape one day earlier: run on the Thursday, Thursday
+    # is live and Monday-Wednesday are written down.
+    thu = dt.date(2026, 8, 6)
+    midweek = W.week_of(thu)
+    if [d.strftime("%a") for d in midweek] != ["Mon", "Tue", "Wed", "Thu"]:
+        out.append(f"  sources: a Thursday run covers {midweek} -- expected "
+                   f"Monday to Thursday, not a padded week")
+    if sources(thu, thu) != ("rt", "ht"):
+        out.append(f"  sources: run on Thursday, Thursday reads "
+                   f"{sources(thu, thu)} -- expected RT then HT")
+    for earlier in midweek[:-1]:
+        if sources(earlier, thu) != ("ht",):
+            out.append(f"  sources: run on Thursday, {earlier:%a} reads "
+                       f"{sources(earlier, thu)} -- expected HT")
+
+    # By the Monday the write-down has happened and RT holds a different session.
+    for today in (fri + dt.timedelta(days=3), fri + dt.timedelta(days=14)):
+        if sources(fri, today) != ("ht",):
+            out.append(f"  sources: run on {today}, Friday reads "
+                       f"{sources(fri, today)} -- a past day must never come "
+                       f"off the real-time tape")
+
+    if sources(fri, fri, policy="force") != ("rt",):
+        out.append("  sources: --rt-today force still falls back to the HDB")
+    if sources(fri, fri, policy="off") != ("ht",):
+        out.append("  sources: --rt-today off still reaches for the RT tapes")
+    if sources(fri, fri, rt=False) != ("ht",):
+        out.append("  sources: RT was chosen with no RT instance configured")
+
+    # -- the row-level date guard on a non-partitioned tape ------------------ #
+    tape = pd.DataFrame({
+        "date": [fri, fri, fri - dt.timedelta(days=1)],
+        "id_target": [1, 2, 3],
+    })
+    kept, dropped = clip_to_date(tape, fri)
+    if dropped != 1 or list(kept["id_target"]) != [1, 2]:
+        out.append(f"  sources: clip_to_date kept {list(kept['id_target'])}, "
+                   f"dropped {dropped} -- expected the other day's row to go")
+    if clip_to_date(tape, fri - dt.timedelta(days=9))[0].empty is False:
+        out.append("  sources: a tape holding none of the requested day was not "
+                   "emptied -- the RT-to-HDB handover depends on that")
+    # A tape with no date column cannot be clipped, and must not be mangled.
+    nodate = pd.DataFrame({"id_target": [1, 2]})
+    if len(clip_to_date(nodate, fri)[0]) != 2:
+        out.append("  sources: a tape with no date column lost rows")
+    return out
+
+
+def check_weekly(raw: RawFrames, note: list[str], outdir: str) -> list[str]:
+    """The weekly roll-up, against a week built from three identical days.
+
+    Identical days are the point: every additive number has to come to exactly
+    three times the day's, and every share has to come back *unchanged* -- which
+    is the difference between recomputing a percentage from summed quantities and
+    averaging five daily percentages, and the reason this check exists.
+    """
+    out: list[str] = []
+    n = len(WEEK_DATES)
+
+    day = assemble(WEEK_DATES[0], "ht", "both", raw, note)
+    days = [assemble(d, "ht", "both", raw, list(note)) for d in WEEK_DATES]
+    week = W.combine_days(days, "both", "ht")
+
+    if week.dates != WEEK_DATES:
+        out.append(f"  weekly: dates {week.dates} != {WEEK_DATES}")
+    if not week.is_weekly:
+        out.append("  weekly: is_weekly is False on a multi-day report")
+    if week.period_label != f"{WEEK_DATES[0]} to {WEEK_DATES[-1]}":
+        out.append(f"  weekly: period label reads {week.period_label!r}")
+
+    # -- one row per day, and the days are distinguishable ------------------- #
+    if len(week.by_day) != n:
+        out.append(f"  weekly: by_day has {len(week.by_day)} rows for {n} days")
+    elif sorted(week.by_day["date"]) != WEEK_DATES:
+        out.append("  weekly: by_day does not carry one row per trading day")
+
+    # -- additive quantities ------------------------------------------------- #
+    dtot = W.total_row(day.summary)
+    wtot = W.total_row(week.summary)
+    for col in ("parent_orders", "order_qty", "executed_qty", "close_qty",
+                "residual_qty", "orders_filled_in_close", "rejections_close",
+                "cancellations_close"):
+        want, got = float(dtot[col]) * n, float(wtot[col])
+        if abs(got - want) > 1e-6:
+            out.append(f"  weekly: summary {col} = {got:,.2f}, expected {want:,.2f}")
+
+    # -- shares recomputed, not averaged ------------------------------------- #
+    for col in ("fill_pct", "close_pct_of_executed", "participation_rate_pct"):
+        want, got = float(dtot[col]), float(wtot[col])
+        if abs(got - want) > 1e-9:
+            out.append(f"  weekly: summary {col} = {got:,.6f}, expected the "
+                       f"day's {want:,.6f} -- identical days must not move a share")
+
+    if not day.benchmark.empty and not week.benchmark.empty:
+        d_vals = day.benchmark.set_index("metric")["value_pct"]
+        w_vals = week.benchmark.set_index("metric")["value_pct"]
+        for metric, v in d_vals.items():
+            got = w_vals.get(metric)
+            if pd.notna(v) and (got is None or abs(float(got) - float(v)) > 1e-9):
+                out.append(f"  weekly: benchmark {metric!r} moved from "
+                           f"{v:,.4f} to {got} on identical days")
+
+    # -- per-sym roll-up ------------------------------------------------------ #
+    if not day.sym_stats.empty:
+        d_close = day.sym_stats.set_index("sym")["close_qty"]
+        w_close = week.sym_stats.set_index("sym")["close_qty"]
+        if len(w_close) != len(d_close):
+            out.append(f"  weekly: sym_stats has {len(w_close)} names for "
+                       f"{len(d_close)} traded in a day")
+        for sym, v in d_close.items():
+            got = float(w_close.get(sym, np.nan))
+            if abs(got - float(v) * n) > 1e-6:
+                out.append(f"  weekly: sym_stats close_qty for {sym} = {got:,.0f}, "
+                           f"expected {float(v) * n:,.0f}")
+        if "n_days" not in week.sym_stats.columns:
+            out.append("  weekly: sym_stats carries no n_days column")
+        elif int(week.sym_stats["n_days"].max()) != n:
+            out.append("  weekly: sym_stats n_days does not reach the week length")
+
+    # -- the mix tables, where a repeated parent id could collapse ------------ #
+    for name, key in (("mix_otype_basket", "otype_kind"),
+                      ("mix_flow_venue_otype", "flow")):
+        d_mix = getattr(day, name)
+        w_mix = getattr(week, name)
+        if d_mix.empty or w_mix.empty:
+            out.append(f"  weekly: {name} came back empty")
+            continue
+        d_row = d_mix[d_mix[key] == "TOTAL"]
+        w_row = w_mix[w_mix[key] == "TOTAL"]
+        if d_row.empty or w_row.empty:
+            continue
+        for col in ("n_child_orders", "n_parents", "size", "make"):
+            want = float(d_row[col].iloc[0]) * n
+            got = float(w_row[col].iloc[0])
+            if abs(got - want) > 1e-6:
+                out.append(
+                    f"  weekly: {name} TOTAL {col} = {got:,.0f}, expected "
+                    f"{want:,.0f} -- a parent id repeating across days was "
+                    f"counted once"
+                )
+        # ... while the same name traded on three days is still one name.
+        want_syms = float(d_row["n_syms"].iloc[0])
+        got_syms = float(w_row["n_syms"].iloc[0])
+        if abs(got_syms - want_syms) > 1e-6:
+            out.append(f"  weekly: {name} TOTAL n_syms = {got_syms:,.0f}, "
+                       f"expected {want_syms:,.0f} distinct names")
+
+    # -- the writers run on a week ------------------------------------------- #
+    R.write_csvs(week, os.path.join(outdir, "week", "csv"))
+    R.write_excel(week, os.path.join(outdir, "week", "cas_selftest_week.xlsx"))
+    html = R.write_html(week, os.path.join(outdir, "week", "cas_selftest_week.html"))
+    trader = T.write_trader_html(
+        week, os.path.join(outdir, "week", "cas_selftest_week_trader.html")
+    )
+    for path, must in (
+        (html, ("Day by day", "week in review")),
+        (trader, ("Day by day", "The period in numbers", "What kept us out")),
+    ):
+        body = open(path, encoding="utf-8").read()
+        for token in must:
+            if token not in body:
+                out.append(f"  weekly: {os.path.basename(path)} has no {token!r} section")
+    return out
+
+
+def check_trader_page(data, outdir: str) -> list[str]:
+    """The single-day trader page: written, self-contained, and no jargon leak."""
+    out: list[str] = []
+    path = T.write_trader_html(data, os.path.join(outdir, "cas_selftest_trader.html"))
+    body = open(path, encoding="utf-8").read()
+
+    for token in ("The period in numbers", "Did we get into the close?",
+                  "What kept us out", "Names that mattered",
+                  "What these words mean"):
+        if token not in body:
+            out.append(f"  trader page: no {token!r} section")
+
+    # A client-facing page must not leak the vocabulary of the pipeline.
+    for token in ("id_target", "id_work", "doclose", "reason_code",
+                  "FILLED_IN_CLOSE", "NOT_SENT", "qatt"):
+        if token in body:
+            out.append(f"  trader page: leaks {token!r} to the client")
+
+    # Every reason the waterfall can produce needs a trader wording, or the page
+    # falls back to a sentence written for a quant.
+    for code in set(CL.NOT_SENT_REASONS) | set(CL.SENT_REASONS):
+        if code not in T.TRADER_REASONS:
+            out.append(f"  trader page: no plain-English wording for {code}")
+        if code not in T.REASON_OWNER:
+            out.append(f"  trader page: no owner for {code}")
+
+    if "<link" in body or "src=\"http" in body:
+        out.append("  trader page: pulls an external resource -- it must be "
+                   "self-contained to survive being emailed")
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -484,6 +719,10 @@ def main() -> int:
     R.write_excel(data, os.path.join(outdir, "cas_selftest.xlsx"))
     R.write_html(data, os.path.join(outdir, "cas_selftest.html"))
     print(f"  selftest output -> {outdir}\n")
+
+    weekly_failures = check_weekly(raw, note, outdir)
+    trader_failures = check_trader_page(data, outdir)
+    source_failures = check_day_sources()
 
     # -- assertions --------------------------------------------------------- #
     failures = []
@@ -599,6 +838,9 @@ def main() -> int:
         failures.append("  the unfilled-order exclusion was not reported as a warning")
 
     failures += check_venue_only()
+    failures += weekly_failures
+    failures += trader_failures
+    failures += source_failures
 
     for _, r in data.reconciliation.iterrows():
         if r["status"] != "OK":
@@ -612,6 +854,11 @@ def main() -> int:
     print("SELFTEST OK -- every waterfall branch fired and the writers ran clean")
     print(f"  rejections: {n_cont} continuous / {n_close} close")
     print(f"  reasons   : {sorted(set(data.orders['reason_code']) - {''})}")
+    print(f"  weekly    : {len(WEEK_DATES)} days rolled up, quantities additive "
+          f"and shares unchanged")
+    print(f"  trader    : both pages written, no pipeline vocabulary leaked")
+    print(f"  sources   : the live day reads RT then HT, every earlier day HT, "
+          f"on Friday, Saturday and Sunday alike")
     return 0
 
 

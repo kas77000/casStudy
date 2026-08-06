@@ -113,6 +113,7 @@ Needs §0.1 and §0.2. **Nothing else. No NIFTY file.**
 
 ```bash
 python -m casretro                                    # yesterday, both flows
+python -m casretro --weekly                           # Monday to today
 python -m casretro --date 2026-08-04 --flow silk
 python -m casretro --mode rt --flow both              # intraday, RT tapes
 python -m casretro --no-market-data --formats csv     # skip the qatt queries
@@ -128,11 +129,82 @@ the only way to get the non-participation waterfall (`NO_CLOSE_INSTRUCTION`,
 `FULLY_FILLED_BEFORE_CAS`, …) — those rules can only fire on orders the default
 excludes. `--keep-unfilled` does the same for orders that traded nothing.
 
-Output: `output/cas_retro_<date>_<flow>/` — CSVs, an `.xlsx`, and a
-self-contained HTML page.
+Output: `output/cas_retro_<date>_<flow>/` — CSVs, an `.xlsx`, and **two**
+self-contained HTML pages:
+
+| file | for | what is on it |
+|---|---|---|
+| `cas_retro_<date>_<flow>.html` | the desk, quant | every section, every column, every row, plus the reconciliation checks |
+| `cas_retro_<date>_<flow>_trader.html` | traders, clients | four questions and then it stops — plain English, IST clocks, ₹ in crore/lakh, no order ids and no reason codes |
+
+Drop either with `--formats`: `html` is the quant page, `trader` the client one.
 
 **Read `reconciliation` first.** Any row that is not `OK` means a number
-elsewhere in the report is suspect, and it says which.
+elsewhere in the report is suspect, and it says which. The trader page says so
+too, at the top, in a sentence — so a page that goes out never hides a failed
+check.
+
+### A — the Friday review
+
+Run at the end of the week, after Friday's close:
+
+```bash
+python -m casretro --weekly
+```
+
+That runs the same pipeline once per business day from Monday up to today, folds
+the days into one report, and writes both HTML pages for the week. The anchor is
+**today**, not the last business day, precisely so a Friday-evening run includes
+Friday. Reviewing last week on the Monday after, name the Friday:
+
+```bash
+python -m casretro --weekly --date 2026-08-07
+python -m casretro --from 2026-07-27 --to 2026-08-07 --per-day   # any range
+```
+
+Each day comes off the tape that actually has it:
+
+| run on | days | source |
+|---|---|---|
+| Thursday | Mon–Wed / **Thu** | HT / **RT** |
+| Friday, after the close | Mon–Thu / **Fri** | HT / **RT** |
+| Saturday or Sunday | Mon–Thu / **Fri** | HT / **RT** |
+| the Monday after | Mon–Fri | HT — RT is never opened |
+
+The **live day** — the most recent business day — is read from the RT tapes,
+because the HDB has usually not written it down yet. If the tapes have already
+handed it over, the run falls back to HT and everything comes from there, so the
+same command works on either side of the write-down. A past day is never read
+from RT: the tape holds whatever it holds *now*, and would be stamped with a date
+it does not belong to.
+
+The `by_day` table's `source` column says which tape served each day, and the
+report's mode reads `ht+rt` when a week mixes them. `--rt-today off` keeps it on
+the HDB entirely; `--rt-today force` disables the fallback.
+
+> The RT order tables get no date predicate server-side, so the day is enforced
+> row by row after loading. The `qatt` queries aggregate server-side and cannot
+> be filtered afterwards — when the live day's market data comes off an RT tape,
+> both HTML pages say so.
+
+What to know before quoting a weekly number:
+
+* a day with no parent order — a holiday, nothing traded, or a day that is on
+  neither tape — is **dropped, not counted as a zero**, and named in the
+  warnings. Check that line first: five days in the range does not mean five days
+  in the numbers;
+* quantities and counts are summed; **every percentage is recomputed from the
+  summed quantities**, so a quiet Monday does not weigh the same as a heavy
+  Friday;
+* close capture is weighted by the size that actually traded in the auction;
+* the new `by_day` section, and the charts above it, are the point of the
+  exercise — one bad print and a habit look identical on a single day;
+* `--per-day` also writes each day's own report under `<out>/days/<date>/`;
+* `--mode rt` is refused here: it would put *every* day on the tapes, which carry
+  no date, so every day would return the same rows. The live day already comes
+  from RT without it.
+
+Output: `output/cas_retro_week_<start>_<end>_<flow>/`.
 
 ---
 
@@ -306,6 +378,12 @@ python cas_price_move.py              # Path B
 python casStudy.py --append-panel     # Path C
 ```
 
+And once a week, on Friday after the close:
+
+```bash
+python -m casretro --weekly           # Path A, Monday to Friday in one report
+```
+
 The NIFTY 50 file is static between index rebalances — NSE reviews
 semi-annually, in March and September. Re-run Path B step 1 then, or whenever a
 constituent changes, and refresh `config/nifty50_weights.csv` at the same time:
@@ -323,6 +401,9 @@ because a missed rebalance corrupts every weighted number silently.
 | Bloomberg says a package is missing | `python tools/bloomberg_nifty50.py --diagnose` |
 | a Bloomberg pull fails | `python tools/bloomberg_check.py` — it names the failing stage |
 | a number looks wrong | the `reconciliation` sheet of the retrospective |
+| a weekly number looks wrong | the `by_day` sheet — which day moved it, which tape it came off, and is a day missing |
+| the live day is missing from a weekly run | is an `oms` `rt` instance configured and reachable? `--check-config --mode rt` |
+| you changed the weekly roll-up or either HTML page | `python tools/selftest.py` |
 | you want to audit a query | `python tools/dump_queries.py --out docs/queries.md` |
 | the price-move query specifically | `python cas_price_move.py --print-query` |
 | the index-study query specifically | `python casStudy.py --print-query` |

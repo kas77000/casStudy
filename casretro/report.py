@@ -23,6 +23,7 @@ from .kdbio import td_to_str
 #: (attribute on ReportData, sheet name, human title)
 SECTIONS: list[tuple[str, str, str]] = [
     ("summary", "summary", "Headline numbers"),
+    ("by_day", "by_day", "Day by day, in full"),
     ("benchmark", "benchmark", "Volume share vs desk benchmarks"),
     ("orders", "orders", "Parent orders"),
     ("non_participation", "non_participation", "Orders that did not trade in the close"),
@@ -147,17 +148,43 @@ def _print_mix(df: pd.DataFrame, keys: list[str], title: str, max_rows: int = 20
         print(f"    ... {len(df) - max_rows} more rows in the CSV / workbook")
 
 
+def _print_by_day(df: pd.DataFrame) -> None:
+    """The week's trend, one line per trading day."""
+    if df is None or df.empty:
+        return
+    print("\n  day by day")
+    print(f"    {'date':<12} {'':<4} {'orders':>7} {'executed':>13} {'in close':>13} "
+          f"{'close%':>7} {'part%':>7} {'capture':>9} {'rej':>5}")
+    for _, r in df.iterrows():
+        print(
+            f"    {str(r['date']):<12} {str(r['weekday']):<4} "
+            f"{_fmt(r['parent_orders'],0):>7} {_fmt(r['executed_qty'],0):>13} "
+            f"{_fmt(r['close_qty'],0):>13} "
+            f"{_fmt(r['close_pct_of_executed'],1,pct=True):>7} "
+            f"{_fmt(r['participation_rate_pct'],1,pct=True):>7} "
+            f"{_fmt(r['mean_close_capture_bps'],1):>9} "
+            f"{_fmt(r['rejections_close'],0):>5}"
+        )
+
+
 def print_console(data: ReportData) -> None:
-    d = data.date.isoformat() if data.date else "(real time)"
+    d = data.period_label
+    title = ("CAS India execution retrospective -- week of"
+             if data.is_weekly else "CAS India execution retrospective --")
     print()
     print("=" * 78)
-    print(f"  CAS India execution retrospective -- {d}   flow={data.flow}   mode={data.mode}")
+    print(f"  {title} {d}   flow={data.flow}   mode={data.mode}")
+    if data.is_weekly:
+        print(f"  {len(data.dates)} trading days: "
+              f"{', '.join(x.strftime('%a %d %b') for x in data.dates)}")
     print(f"  all times HKT (IST = HKT - 02:30)")
     print("=" * 78)
 
     if data.orders.empty:
         print("\n  no parent order matched the filters\n")
         return
+
+    _print_by_day(data.by_day)
 
     for _, r in data.summary.iterrows():
         print(f"\n  [{r['flow']}]")
@@ -284,8 +311,10 @@ def write_excel(data: ReportData, path: str) -> str | None:
 
 def _cover(data: ReportData) -> pd.DataFrame:
     rows = [
-        ("report", "CAS India execution retrospective"),
-        ("date", data.date.isoformat() if data.date else "real time (no date filter)"),
+        ("report", "CAS India execution retrospective"
+                   + (" -- week in review" if data.is_weekly else "")),
+        ("period", data.period_label if data.date else "real time (no date filter)"),
+        ("trading days", ", ".join(x.isoformat() for x in data.dates) or "1"),
         ("flow", data.flow),
         ("kdb mode", data.mode),
         ("timezone", "HKT (IST = HKT - 02:30)"),
@@ -488,18 +517,97 @@ def _grouped_bar_chart(
     )
 
 
+def _column_chart(
+    items: list[tuple[str, float]],
+    *,
+    unit: str = "",
+    color: str = "var(--seq-450)",
+    width: int = 1080,
+    height: int = 190,
+    decimals: int = 1,
+    baseline: float | None = None,
+    baseline_label: str = "",
+) -> str:
+    """Vertical columns, one per day -- a week reads left to right, not top down.
+
+    `baseline` draws a dashed reference line (the benchmark, the week's own mean)
+    so a day is read against something rather than in isolation.
+    """
+    items = [
+        (k, float(v)) for k, v in items
+        if v is not None and not (isinstance(v, float) and np.isnan(v))
+    ]
+    if not items:
+        return '<p class="sub">nothing to plot</p>'
+
+    vals = [v for _, v in items] + ([baseline] if baseline is not None else [])
+    vmax = max(vals) or 1.0
+    vmin = min(0.0, min(vals))
+    span = (vmax - vmin) or 1.0
+
+    # A negative column carries its value label underneath, which needs room
+    # between the bottom of the plot and the day labels.
+    pad_l, pad_r, pad_t = 8, 8, 26
+    pad_b = 30 if vmin >= 0 else 48
+    plot_h = height - pad_t - pad_b
+    plot_w = width - pad_l - pad_r
+
+    def y_of(v: float) -> float:
+        return pad_t + plot_h - (v - vmin) / span * plot_h
+
+    slot = plot_w / len(items)
+    bar_w = min(74.0, slot * 0.52)
+    out = []
+    zero_y = y_of(0.0)
+    out.append(f'<line x1="{pad_l}" y1="{zero_y:.1f}" x2="{width - pad_r}" '
+               f'y2="{zero_y:.1f}" stroke="var(--axis)" stroke-width="1"/>')
+    if baseline is not None:
+        by = y_of(float(baseline))
+        out.append(
+            f'<line x1="{pad_l}" y1="{by:.1f}" x2="{width - pad_r}" y2="{by:.1f}" '
+            f'stroke="var(--series-2)" stroke-width="1" stroke-dasharray="4 3"/>'
+            f'<text x="{width - pad_r}" y="{by - 4:.1f}" text-anchor="end" font-size="11" '
+            f'fill="var(--series-2)">{_esc(baseline_label or f"{baseline:,.2f}{unit}")}</text>'
+        )
+    for i, (k, v) in enumerate(items):
+        cx = pad_l + slot * (i + 0.5)
+        top = y_of(max(v, 0.0))
+        bot = y_of(min(v, 0.0))
+        h = max(2.0, bot - top)
+        # The value sits above a positive column and below a negative one, so it
+        # never lands on top of the zero line it is being read against.
+        label_y = (top - 7) if v >= 0 else (top + h + 13)
+        out.append(
+            f'<g><title>{_esc(k)}: {v:,.{decimals}f}{unit}</title>'
+            f'<rect class="mark" x="{cx - bar_w / 2:.1f}" y="{top:.1f}" '
+            f'width="{bar_w:.1f}" height="{h:.1f}" rx="4" fill="{color}"/>'
+            f'<text x="{cx:.1f}" y="{label_y:.1f}" text-anchor="middle" font-size="12" '
+            f'fill="var(--text-primary)">{v:,.{decimals}f}{unit}</text>'
+            f'<text x="{cx:.1f}" y="{height - 10}" text-anchor="middle" font-size="12" '
+            f'fill="var(--text-secondary)">{_esc(k)}</text></g>'
+        )
+    return (
+        f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
+        f'role="img">{"".join(out)}</svg>'
+    )
+
+
 def _tile(k: str, v: str, note: str = "") -> str:
     note_html = f'<div class="n">{_esc(note)}</div>' if note else ""
     return f'<div class="tile"><div class="k">{_esc(k)}</div><div class="v">{_esc(v)}</div>{note_html}</div>'
 
 
 def write_html(data: ReportData, path: str) -> str:
-    d = data.date.isoformat() if data.date else "real time"
+    d = data.period_label
     parts: list[str] = []
 
-    parts.append(f"<h1>CAS India execution retrospective</h1>")
+    heading = ("CAS India execution retrospective &ndash; week in review"
+               if data.is_weekly else "CAS India execution retrospective")
+    days = (f' &nbsp;&middot;&nbsp; {len(data.dates)} trading days'
+            if data.is_weekly else "")
+    parts.append(f"<h1>{heading}</h1>")
     parts.append(
-        f'<p class="sub">{_esc(d)} &nbsp;&middot;&nbsp; flow <strong>{_esc(data.flow)}</strong>'
+        f'<p class="sub">{_esc(d)}{days} &nbsp;&middot;&nbsp; flow <strong>{_esc(data.flow)}</strong>'
         f' &nbsp;&middot;&nbsp; {_esc(data.mode.upper())} tapes'
         f' &nbsp;&middot;&nbsp; all times HKT (IST = HKT &minus; 02:30)'
         f' &nbsp;&middot;&nbsp; {len(data.universe):,} CAS-eligible syms</p>'
@@ -522,6 +630,34 @@ def write_html(data: ReportData, path: str) -> str:
                   f"{int(row['orders_filled_in_close']):,} of {int(row['parent_orders']):,}"),
         ]
         parts.append(f'<div class="tiles">{"".join(tiles)}</div>')
+
+        # -- the week, day by day ------------------------------------------- #
+        bd = data.by_day
+        if bd is not None and not bd.empty:
+            labels = [f"{r['weekday']} {r['date']}" for _, r in bd.iterrows()]
+            parts.append("<h2>Day by day</h2>")
+            for title, col, unit, dec, colour in (
+                ("Orders that traded in the auction, % of the day's parents",
+                 "participation_rate_pct", "%", 1, "var(--series-1)"),
+                ("Shares traded in the auction", "close_qty", "", 0, "var(--seq-450)"),
+                ("Close capture, bps, weighted by the size that traded in the "
+                 "auction (positive = better than the auction print)",
+                 "close_capture_bps_wtd", "", 1, "var(--series-3)"),
+            ):
+                if col not in bd.columns:
+                    continue
+                series = list(zip(labels, bd[col]))
+                mean = pd.to_numeric(bd[col], errors="coerce").mean()
+                parts.append(f"<h3>{_esc(title)}</h3>")
+                parts.append(
+                    f'<div class="card">'
+                    + _column_chart(
+                        series, unit=unit, decimals=dec, color=colour,
+                        baseline=None if pd.isna(mean) else float(mean),
+                        baseline_label=f"week {mean:,.{dec}f}{unit}" if pd.notna(mean) else "",
+                    )
+                    + "</div>"
+                )
 
         # -- participation ------------------------------------------------- #
         parts.append("<h2>Close participation</h2>")
@@ -639,7 +775,8 @@ def write_html(data: ReportData, path: str) -> str:
     doc = (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        f"<title>CAS retrospective {_esc(d)} - {_esc(data.flow)}</title>"
+        f"<title>CAS retrospective {'week ' if data.is_weekly else ''}"
+        f"{_esc(d)} - {_esc(data.flow)}</title>"
         f"<style>{_CSS}</style></head>"
         f'<body class="viz-root"><div class="wrap">{"".join(parts)}</div></body></html>'
     )
