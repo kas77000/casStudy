@@ -18,13 +18,14 @@ lightness and chroma inside the band and contrast over 3:1 against each surface.
 from __future__ import annotations
 
 import datetime as dt
+import math
 import os
 
 import numpy as np
 import pandas as pd
 
 from casretro import config as C
-from casretro.report import _CSS, _esc
+from casretro.report import _CSS, _esc, _tile
 
 from . import config as V
 from . import metrics as M
@@ -40,6 +41,11 @@ SERIES_EXECUTED = "var(--series-1)"
 SERIES_UNFILLED = "var(--series-2)"
 
 DASH = "–"
+
+#: Narrowest a day label may sit from its neighbour before the axis is thinned.
+#: "Mon 03 Aug" measures ~66px at 12px; the short forms roughly 36-44px, so this
+#: is the tightest of them plus a little air.
+MIN_LABEL_PX = 44.0
 
 
 # --------------------------------------------------------------------------- #
@@ -59,12 +65,18 @@ def _pct(v, nd: int = 1) -> str:
 
 
 def _usd(v) -> str:
-    """USD in the units a desk reads: m, k, then dollars."""
+    """USD in the units a desk reads: bn, m, k, then dollars.
+
+    The bn step matters here: a week's notional sent to the auction runs past a
+    billion, and "$1,379.13m" is a number nobody reads at a glance.
+    """
     if not _ok(v):
         return DASH
     x = float(v)
     sign = "-" if x < 0 else ""
     a = abs(x)
+    if a >= 1e9:
+        return f"{sign}${a / 1e9:,.2f}bn"
     if a >= 1e6:
         return f"{sign}${a / 1e6:,.2f}m"
     if a >= 1e3:
@@ -76,6 +88,22 @@ def _day(d) -> str:
     if isinstance(d, (dt.date, dt.datetime)):
         return f"{d:%a %d %b}"
     return str(d)
+
+
+def _day_axis(d, n_days: int) -> str:
+    """A day label that still fits when the charts sit two to a row.
+
+    "Mon 03 Aug" needs ~66px; a half-width chart gives a 10-day range 50px per
+    bar.  The label shortens with the range rather than overprinting its
+    neighbour -- the table underneath always carries the full date.
+    """
+    if not isinstance(d, (dt.date, dt.datetime)):
+        return str(d)
+    if n_days <= 6:
+        return f"{d:%a %d %b}"
+    if n_days <= 12:
+        return f"{d:%d %b}"
+    return f"{d:%d/%m}"
 
 
 def _ist(t: dt.time) -> str:
@@ -96,14 +124,18 @@ def _flow_label(flow: str) -> str:
 # --------------------------------------------------------------------------- #
 
 _V2_CSS = """
-.lede{font-size:15px;line-height:1.55;max-width:80ch;margin:0 0 20px;}
+.lede{font-size:15px;line-height:1.55;margin:0 0 20px;}
 .note{background:var(--surface-1);border:1px solid var(--border);
  border-left:3px solid var(--warning);border-radius:8px;padding:11px 14px;
  margin:0 0 16px;font-size:13px;color:var(--text-secondary);}
 .note b{color:var(--text-primary);font-weight:600;}
-.take{font-size:13.5px;color:var(--text-secondary);margin:0 0 14px;max-width:82ch;}
-.grid2{display:flex;flex-wrap:wrap;gap:18px;}
-.grid2 > *{flex:1 1 460px;min-width:0;}
+/* Captions run the full width of the content they describe: these are one- or
+   two-line notes above a 1200px table, not body copy that needs a reading
+   measure. */
+.take{font-size:13.5px;color:var(--text-secondary);margin:0 0 14px;}
+.grid2{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start;}
+.grid2 > *{flex:1 1 440px;min-width:0;}
+.grid2 h3{margin-top:0;}
 table.v2{border-collapse:collapse;width:100%;font-size:12.5px;
  font-variant-numeric:tabular-nums;}
 table.v2 th,table.v2 td{padding:7px 10px;border-bottom:1px solid var(--grid);
@@ -154,8 +186,9 @@ def _legend(items: list[tuple[str, str]]) -> str:
 def _stacked_day_chart(
     rows: list[tuple[str, float, float, float]],
     *,
-    width: int = 1060,
-    height: int = 260,
+    width: int = 560,
+    height: int = 250,
+    ratio_decimals: int = 1,
 ) -> str:
     """One bar per day: executed stacked under unfilled, ratio labelled on top.
 
@@ -163,6 +196,13 @@ def _stacked_day_chart(
     measure in the same unit, so they share one axis; a 2px surface gap keeps the
     two fills from reading as one block, and the ratio is the only number printed
     on the plot -- the table underneath carries the rest.
+
+    The default width is half the content column, because the two order types sit
+    side by side: rendering at roughly the size it is displayed keeps the labels
+    at their intended 12px rather than shrinking them with the SVG.
+
+    `ratio_decimals` is 1 by default -- a limit book that fills 0.4% and one that
+    fills 4.1% both round to nothing useful at zero decimals.
     """
     rows = [r for r in rows if _ok(r[1]) or _ok(r[2])]
     if not rows:
@@ -179,6 +219,11 @@ def _stacked_day_chart(
     slot = plot_w / len(rows)
     bar_w = min(76.0, slot * 0.5)
     gap = 2.0                       # surface gap between the two fills
+
+    # Past a few weeks the bars are narrower than their own labels, so label
+    # every nth bar rather than overprinting.  The table carries every day, so
+    # thinning the axis costs nothing that is not still on the page.
+    stride = max(1, int(math.ceil(MIN_LABEL_PX / slot)))
     base_y = pad_t + plot_h
     out = [f'<line x1="{pad_l}" y1="{base_y}" x2="{width - pad_r}" y2="{base_y}" '
            f'stroke="var(--axis)" stroke-width="1"/>']
@@ -209,16 +254,17 @@ def _stacked_day_chart(
             )
 
         top = base_y - h_exec - (gap + h_unf if h_unf > 0 else 0)
-        if _ok(ratio):
+        if _ok(ratio) and i % stride == 0:
             out.append(
                 f'<text x="{cx:.1f}" y="{top - 8:.1f}" text-anchor="middle" '
                 f'font-size="12" font-weight="600" fill="var(--text-primary)">'
-                f'{float(ratio):,.0f}%</text>'
+                f'{float(ratio):,.{ratio_decimals}f}%</text>'
             )
-        out.append(
-            f'<text x="{cx:.1f}" y="{height - 12}" text-anchor="middle" '
-            f'font-size="12" fill="var(--text-secondary)">{_esc(label)}</text>'
-        )
+        if i % stride == 0:
+            out.append(
+                f'<text x="{cx:.1f}" y="{height - 12}" text-anchor="middle" '
+                f'font-size="12" fill="var(--text-secondary)">{_esc(label)}</text>'
+            )
 
     return (f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
             f'role="img">{"".join(out)}</svg>')
@@ -227,6 +273,64 @@ def _stacked_day_chart(
 # --------------------------------------------------------------------------- #
 # Sections                                                                     #
 # --------------------------------------------------------------------------- #
+
+def _kpis(data: PeriodData) -> str:
+    """The row a trader or a manager reads before anything else.
+
+    Six tiles, all anchored on notional executed in the auction: what we put
+    through, what we sent to get it, how much of it filled, how big that made us
+    in the auction, what was left, and who it was for.  Everything is the period
+    total -- ratios recomputed from summed quantities, never averaged across
+    days.
+    """
+    k = M.headline(data.children, data.market)
+    if not k:
+        return ""
+
+    by = k.get("by_otype", {})
+    mkt = by.get(V.OTYPE_MARKET, {})
+    lim = by.get(V.OTYPE_LIMIT, {})
+
+    split = " · ".join(
+        f"{name.lower()} {_usd(d.get('exec_notional_usd'))}"
+        for name, d in ((V.OTYPE_MARKET, mkt), (V.OTYPE_LIMIT, lim)) if d
+    )
+    fill_split = " · ".join(
+        f"{name.lower()} {_pct(d.get('fill_rate_qty_pct'))}"
+        for name, d in ((V.OTYPE_MARKET, mkt), (V.OTYPE_LIMIT, lim)) if d
+    )
+
+    who = f"{k['n_clients']:,} clients"
+    if k.get("top_client_pct") is not None:
+        who += f" · top {_pct(k['top_client_pct'], 0)}"
+
+    best = ""
+    if k.get("best_day") is not None:
+        best = f"biggest day {_day(k['best_day'])} at {_pct(k.get('best_day_pct'), 0)}"
+
+    tiles = [
+        _tile("Notional executed in the close", _usd(k["exec_notional_usd"]),
+              split or f"{_qty(k['exec_qty'])} shares"),
+        _tile("Notional sent to the auction", _usd(k["sent_notional_usd"]),
+              f"{_qty(k['sent_qty'])} shares · {k['n_orders']:,} orders"),
+        _tile("Fill rate", _pct(k["fill_rate_notional_pct"]),
+              f"of notional · {_pct(k['fill_rate_qty_pct'])} of shares"),
+        _tile("By order type", fill_split or "—", "share of what was sent that traded"),
+        _tile("Share of the auction", _pct(k.get("share_of_auction_pct"), 2),
+              f"of {_usd(k.get('mkt_close_notional_usd'))} printed in our names"
+              + (f" · {_pct(k['auction_coverage_pct'], 0)} of our notional priced"
+                 if _ok(k.get("auction_coverage_pct"))
+                 and k["auction_coverage_pct"] < 99.5 else "")),
+        _tile("Not executed", _usd(k["unfilled_notional_usd"]),
+              "sent to the close and left unfilled"),
+    ]
+
+    foot = f"{k['n_syms']:,} names · {who}"
+    if best:
+        foot += f" · {best}"
+    return (f'<div class="tiles">{"".join(tiles)}</div>'
+            f'<p class="take">{_esc(foot)}</p>')
+
 
 def _execution_quality(data: PeriodData) -> str:
     eq = data.execution_quality
@@ -237,24 +341,36 @@ def _execution_quality(data: PeriodData) -> str:
     parts = [
         '<p class="take">One bar per day, in shares: what we sent to the auction, '
         'split into the part that traded and the part that did not. The number '
-        'above each bar is the fill ratio &mdash; executed over sent. The table '
-        'carries the same days in USD.</p>',
+        'above each bar is the fill ratio &mdash; executed over sent. The tables '
+        'carry the same days in USD.</p>',
         _legend([("Executed", SERIES_EXECUTED), ("Sent, not executed", SERIES_UNFILLED)]),
     ]
 
+    # Market and limit sit side by side, charts on one row and their tables on
+    # the next, so the two order types are read against each other rather than
+    # one scrolled past to reach the other.  Both columns are built in the same
+    # pass and emitted as two rows.
+    charts: list[str] = []
+    tables: list[str] = []
+
     for otype in V.OTYPES:
         sub = eq[eq["otype_kind"] == otype]
-        parts.append(f"<h3>{_esc(otype.title())}</h3>")
+        title = f"<h3>{_esc(otype.title())}</h3>"
         if sub.empty:
-            parts.append(f'<p class="sub">no {otype.lower()} child order reached '
-                         f'the auction in this period</p>')
+            note = (f'<p class="sub">no {otype.lower()} child order reached the '
+                    f'auction in this period</p>')
+            charts.append(f"<div>{title}{note}</div>")
+            tables.append(f"<div>{title}{note}</div>")
             continue
 
         rows = [
-            (_day(r["date"]), r["exec_qty"], r["unfilled_qty"], r["fill_rate_pct"])
+            (_day_axis(r["date"], len(sub)), r["exec_qty"], r["unfilled_qty"],
+             r["fill_rate_pct"])
             for _, r in sub.iterrows()
         ]
-        parts.append(f'<div class="card">{_stacked_day_chart(rows)}</div>')
+        charts.append(
+            f'<div>{title}<div class="card">{_stacked_day_chart(rows)}</div></div>'
+        )
 
         head = [("Day", ""), ("Sent", "num"), ("Executed", "num"),
                 ("Fill ratio", "num"), ("Executed notional", "num"),
@@ -272,19 +388,23 @@ def _execution_quality(data: PeriodData) -> str:
             total = ["Period", _qty(t["sent_qty"]), _qty(t["exec_qty"]),
                      _pct(t["fill_rate_pct"]), _usd(t["exec_notional_usd"]),
                      _usd(t["sent_notional_usd"])]
-        parts.append(_table(head, body, total))
 
         # Market orders have no price of their own, so their unfilled quantity is
         # valued at the auction close.  Say how much of the total that is.
         sub_pct = pd.to_numeric(sub["substituted_pct"], errors="coerce").max()
+        caveat = ""
         if _ok(sub_pct) and sub_pct > 0:
-            parts.append(
+            caveat = (
                 f'<p class="sub">Up to {_pct(sub_pct)} of a day&rsquo;s '
                 f'&ldquo;total notional sent&rdquo; here is unfilled quantity '
                 f'valued at the auction&rsquo;s closing price, because a '
                 f'{otype.lower()} order carries no price of its own to be '
                 f'unfilled at.</p>'
             )
+        tables.append(f"<div>{title}{_table(head, body, total)}{caveat}</div>")
+
+    parts.append(f'<div class="grid2">{"".join(charts)}</div>')
+    parts.append(f'<div class="grid2">{"".join(tables)}</div>')
     return "".join(parts)
 
 
@@ -373,15 +493,6 @@ def _clients(data: PeriodData) -> str:
 # The page                                                                     #
 # --------------------------------------------------------------------------- #
 
-def _provisional(data: PeriodData) -> str:
-    if not data.rt_dates:
-        return ""
-    days = ", ".join(d.isoformat() for d in data.rt_dates)
-    return (f'<div class="note"><b>Provisional for {_esc(days)}.</b> That day was '
-            f'read from the live trading records, before the end-of-day books '
-            f'were finalised. Every earlier day is final.</div>')
-
-
 def _missing(data: PeriodData) -> str:
     if not data.missing:
         return ""
@@ -400,8 +511,8 @@ def write_html(data: PeriodData, path: str) -> str:
         + f' &nbsp;&middot;&nbsp; NSE closing auction'
         + (f' &nbsp;&middot;&nbsp; {_esc(data.fx_note)}' if data.fx_note else "")
         + "</p>",
-        _provisional(data),
         _missing(data),
+        _kpis(data),
         "<h2>Execution Quality</h2>",
         _execution_quality(data),
         "<h2>Flows</h2>",

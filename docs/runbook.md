@@ -155,6 +155,11 @@ python -m casretro_v2 --date 2026-08-04                # one day
 python -m casretro_v2 --flow silk --fx divide
 ```
 
+> **Verifying it.** [`casretro_v2_method.md`](casretro_v2_method.md) documents
+> every element of the page: the seven queries with their exact q text, the
+> child-order frame each number is aggregated from, the formula behind every
+> tile, chart and column, and the limits worth knowing before quoting a figure.
+
 Weekly by default — every chart is one bar per day, so a period is the natural
 unit and a single day is just a period of length one. Dates, the business-day
 calendar and the live-day HT/RT rule live in `casretro_v2/days.py`, the only

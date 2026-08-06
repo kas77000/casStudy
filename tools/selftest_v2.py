@@ -228,6 +228,112 @@ def check_fallback(factors: pd.DataFrame) -> list[str]:
     return out
 
 
+def check_clients_are_period_wide() -> list[str]:
+    """The client tables rank on the whole period, not on any single day.
+
+    Built to be unambiguous: STEADY trades a little on every day of the period
+    and BURST trades more than all of that on one day alone.  If the ranking were
+    per-day, or if it silently took the last day, STEADY would win.
+    """
+    out: list[str] = []
+    rows = []
+    for i, date in enumerate(DATES):
+        rows.append({"date": date, "flow": "SILK", "basket": "STEADY",
+                     "sym": f"S{i}.IN", "otype_kind": "LIMIT",
+                     "id_target": 900 + i, "id_work": 9000 + i,
+                     "sent_qty": 100.0, "exec_qty": 100.0, "unfilled_qty": 0.0,
+                     "exec_notional_usd": 10.0, "unfilled_notional_usd": 0.0,
+                     "sent_notional_usd": 10.0})
+    rows.append({"date": DATES[0], "flow": "SILK", "basket": "BURST",
+                 "sym": "B0.IN", "otype_kind": "LIMIT",
+                 "id_target": 950, "id_work": 9500,
+                 "sent_qty": 100.0, "exec_qty": 50.0, "unfilled_qty": 50.0,
+                 "exec_notional_usd": 31.0, "unfilled_notional_usd": 31.0,
+                 "sent_notional_usd": 62.0})
+    children = pd.DataFrame(rows)
+
+    top = M.top_clients(children, pd.DataFrame(), "SILK")
+    if top.empty:
+        return ["  clients: top_clients came back empty"]
+
+    order = list(top[V.CLIENT_COLUMN])
+    if order[:2] != ["BURST", "STEADY"]:
+        out.append(f"  clients: ranked {order}, expected BURST first -- one big "
+                   f"day must outrank three small ones, which is what makes the "
+                   f"ranking period-wide rather than per-day")
+
+    steady = top[top[V.CLIENT_COLUMN] == "STEADY"]
+    if not steady.empty:
+        r = steady.iloc[0]
+        if not close(r["exec_notional_usd"], 10.0 * len(DATES)):
+            out.append(f"  clients: STEADY shows {r['exec_notional_usd']} traded, "
+                       f"expected {10.0 * len(DATES)} -- the period is summed, "
+                       f"not sampled")
+        if not close(r["n_days"], len(DATES)):
+            out.append("  clients: n_days does not count every day of the period")
+        if not close(r["n_syms"], len(DATES)):
+            out.append("  clients: n_syms does not count distinct names over "
+                       "the period")
+
+    burst = top[top[V.CLIENT_COLUMN] == "BURST"]
+    if not burst.empty and not close(burst.iloc[0]["fill_rate_pct"], 50.0):
+        out.append("  clients: fill rate is not executed / sent over the period")
+    return out
+
+
+def check_market_coverage() -> list[str]:
+    """Our share of the auction compares like with like.
+
+    A symbol that never printed between 17:58 and 18:00 carries no closing price,
+    so it contributes nothing to the market notional.  If its own executed
+    notional stayed in the numerator the share would be overstated -- here, 100%
+    instead of 10% -- so both sides are held to the same names and what that
+    excluded is reported as coverage.
+    """
+    out: list[str] = []
+    d = DATES[0]
+
+    def child(sym, notional):
+        return dict(date=d, flow="SILK", basket="B", sym=sym, otype_kind="LIMIT",
+                    id_target=hash(sym) % 1000, id_work=hash(sym) % 1000,
+                    sent_qty=notional, exec_qty=notional, unfilled_qty=0.0,
+                    exec_notional_usd=notional, unfilled_notional_usd=0.0,
+                    sent_notional_usd=notional)
+
+    children = pd.DataFrame([child("A.IN", 100.0), child("NOPRINT.IN", 900.0)])
+    market = pd.DataFrame([dict(date=d, sym="A.IN", mkt_close_qty=1000.0,
+                                mkt_close_notional_usd=1000.0)])
+
+    t = M.flows_total(children, market)
+    if t is None:
+        return ["  coverage: flows_total came back empty"]
+    if not close(t["our_pct_of_market_notional"], 10.0):
+        out.append(f"  coverage: share of the auction is "
+                   f"{t['our_pct_of_market_notional']}%, expected 10% -- an "
+                   f"unpriced name must leave the numerator as well as the "
+                   f"denominator")
+    if not close(t["covered_exec_notional_usd"], 100.0):
+        out.append("  coverage: the numerator was not restricted to priced names")
+    if not close(t["market_coverage_pct"], 10.0):
+        out.append("  coverage: market_coverage_pct does not report how much of "
+                   "our notional could be compared")
+
+    k = M.headline(children, market)
+    if not close(k.get("share_of_auction_pct"), 10.0):
+        out.append("  coverage: the KPI tile disagrees with the Flows total")
+
+    # Every symbol priced -> full coverage, and the share is the plain ratio.
+    market2 = pd.concat([market, pd.DataFrame([
+        dict(date=d, sym="NOPRINT.IN", mkt_close_qty=9000.0,
+             mkt_close_notional_usd=9000.0)])], ignore_index=True)
+    t2 = M.flows_total(children, market2)
+    if not close(t2["market_coverage_pct"], 100.0) or not close(
+            t2["our_pct_of_market_notional"], 10.0):
+        out.append("  coverage: with every name priced the share should be "
+                   "1,000 / 10,000 at 100% coverage")
+    return out
+
+
 def check_day_sources() -> list[str]:
     """Which days a run covers, and which tape each is read from.
 
@@ -332,6 +438,8 @@ def main() -> int:
         failures.append("  fx: a USD-quoted sym was still converted")
 
     failures += check_fallback(factors)
+    failures += check_clients_are_period_wide()
+    failures += check_market_coverage()
 
     # -- the child-order frame ---------------------------------------------- #
     days = [day(d, factors) for d in DATES]
@@ -497,6 +605,10 @@ def main() -> int:
           f"on Thursday, Friday, Saturday and Sunday alike")
     print(f"  fallback  : an empty, erroring or universe-less RT tape hands the "
           f"live day to the HDB without losing it")
+    print(f"  clients   : ranked on the whole period -- one big day outranks "
+          f"three small ones")
+    print(f"  coverage  : our share of the auction compares like with like, and "
+          f"says how much it could compare")
     return 0
 
 

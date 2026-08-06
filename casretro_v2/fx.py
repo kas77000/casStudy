@@ -94,7 +94,12 @@ def usd_factors(
 
 
 def describe(factors: pd.DataFrame, convention: str = V.FX_AUTO) -> str:
-    """One line for the page, naming the rate actually applied."""
+    """One line for the page, naming the rate actually applied.
+
+    The wording follows the direction that was *used*, so a rate of 0.0105 reads
+    "1 INR = 0.0105 USD" and one of 95.2 reads "1 USD = 95.2000 INR".  Labelling
+    both as "INR per USD" would put the wrong sentence next to a right number.
+    """
     if factors is None or factors.empty:
         return "USD conversion unavailable."
     live = factors[(factors["ccy"] != V.REPORT_CCY) & factors["fx_last"].notna()]
@@ -102,10 +107,14 @@ def describe(factors: pd.DataFrame, convention: str = V.FX_AUTO) -> str:
         return f"Notionals in {V.REPORT_CCY}."
     ccy = live["ccy"].mode().iloc[0] if not live["ccy"].mode().empty else "local"
     rate = float(live.loc[live["ccy"] == ccy, "fx_last"].median())
-    how = ("read from its magnitude" if convention == V.FX_AUTO
-           else f"forced with --fx {convention}")
-    return (f"Converted at fx_last = {rate:,.4f} {ccy} per {V.REPORT_CCY} "
-            f"(direction {how}).")
+    how = ("direction read from its magnitude" if convention == V.FX_AUTO
+           else f"direction forced with --fx {convention}")
+
+    if factor_from_rate(rate, convention) == rate:      # fx_last is USD per local
+        quote = f"1 {ccy} = {rate:,.4f} {V.REPORT_CCY}"
+    else:                                               # fx_last is local per USD
+        quote = f"1 {V.REPORT_CCY} = {rate:,.4f} {ccy}"
+    return f"Converted at fx_last: {quote} ({how})."
 
 
 def attach(df: pd.DataFrame, factors: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:

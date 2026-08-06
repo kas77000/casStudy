@@ -258,6 +258,74 @@ does the same for the trader review.
 
 ---
 
+## 5.5 The trader review — `casretro_v2`
+
+`casretro` is the desk's worksheet. **`casretro_v2` is the page that goes to the
+trading floor and to clients**, and it answers three questions and stops.
+
+```bash
+python -m casretro_v2                                   # Monday to today
+python -m casretro_v2 --from 2026-07-27 --to 2026-08-07
+python -m casretro_v2 --date 2026-08-04                 # a single day
+python -m casretro_v2 --flow silk --fx divide
+```
+
+Weekly by default: every chart is one bar per day, so a period is the natural
+unit. Dates, the business-day calendar and the live-day HT/RT rule live in
+`casretro_v2/days.py`, the only place in the repo that knows what a week is.
+
+A **KPI row** opens the page — notional executed in the close, notional sent,
+fill rate by notional and by shares, the market/limit split, our share of the
+auction, and what was left unfilled — then three sections:
+
+| section | what is on it |
+|---|---|
+| **Execution Quality** | market and limit side by side: one stacked bar per day, quantity sent split into executed and not, with the fill ratio on each bar and both notionals in USD in the table below |
+| **Flows** | one row per day × flow × type: orders, child orders, notional traded in the close, fill rate, distinct symbols, and the market's own close volume and notional in those same names |
+| **Top 5 clients** | the biggest baskets of each flow by notional traded in the close, ranked over the whole period; SILK and Agency separately on a `--flow both` run |
+
+**Pricing.** Executed quantity at the fill price off the execution table.
+Unfilled quantity at the child order's own price off the workorder — and for a
+market order, which carries no price to be unfilled at, at the auction's closing
+price. The page reports how much of the total rests on that substitution.
+
+**The market side**, from `qatt`, per symbol per day:
+
+| number | window |
+|---|---|
+| close volume | every print from **17:50 HKT** (15:20 IST) to end of day |
+| close price | the **first** print between **17:58 and 18:00 HKT** (15:28–15:30 IST), where the auction freezes |
+
+Market notional is close volume × close price. Each row's denominator covers
+**only the symbols that row traded**, and the numerator is held to those same
+names — so a symbol with no closing price leaves both sides rather than
+inflating the share. Rows sharing a name overlap, so the market notional column
+does not add up down the page; the Period row is recomputed over distinct
+symbols.
+
+**USD.** `equity.fx_last` is a *daily* column, so each day is converted at its
+own rate read from that day's `equity` partition — never one snapshot's rate
+stretched across a week. The direction of the quote is undocumented but
+recoverable: for a currency far from parity the two candidates are reciprocals
+on opposite sides of 1, so the magnitude names the direction and both readings
+give the same USD number. `--fx divide|multiply` forces it near parity.
+
+Only close-venue child orders are counted, and the child-order event log is
+collapsed to one row per `id_work` first, so an amended order counts once rather
+than once per amendment.
+
+Output: `output/cas_v2_<start>_<end>_<flow>/` — the page, plus the CSVs behind
+every number on it.
+
+**To check the numbers**, [`docs/casretro_v2_method.md`](docs/casretro_v2_method.md)
+maps every element of the page to the query that fed it and the arithmetic that
+produced it: the seven queries with their exact q text, the child-order frame
+everything is aggregated from, the formula behind each tile, chart and column,
+the conventions that hold throughout, and the limits worth knowing before
+quoting a figure.
+
+---
+
 ## 4. The CAS session calendar
 
 Straight from the India CAS deck. Everything in the code references
