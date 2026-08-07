@@ -124,6 +124,12 @@ def _flow_label(flow: str) -> str:
 # --------------------------------------------------------------------------- #
 
 _V2_CSS = """
+/* Wider than the desk's own report (1200px), because this page puts the market
+   and limit tables side by side.  Six columns need ~684px each -- "TOTAL
+   NOTIONAL SENT" is the widest header and sets it -- so 1500px leaves each
+   column 741px and neither table needs a horizontal scrollbar.  It is a cap,
+   not a width: a narrower screen still uses what it has. */
+.wrap{max-width:1500px;}
 .lede{font-size:15px;line-height:1.55;margin:0 0 20px;}
 .note{background:var(--surface-1);border:1px solid var(--border);
  border-left:3px solid var(--warning);border-radius:8px;padding:11px 14px;
@@ -186,8 +192,8 @@ def _legend(items: list[tuple[str, str]]) -> str:
 def _stacked_day_chart(
     rows: list[tuple[str, float, float, float]],
     *,
-    width: int = 560,
-    height: int = 250,
+    width: int = 660,
+    height: int = 260,
     ratio_decimals: int = 1,
 ) -> str:
     """One bar per day: executed stacked under unfilled, ratio labelled on top.
