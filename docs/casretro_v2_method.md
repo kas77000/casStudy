@@ -335,6 +335,13 @@ combined ones, and the selftest asserts it.
 The reason for showing both: SILK and agency fill at different rates, so their
 sum describes neither. A combined 44% can be 60% and 25% side by side.
 
+**A flow may carry a note**, printed at the top of its section on both pages,
+from `config.FLOW_NOTES`. SILK's says *"Internalisation is counted as a market
+order."* — it is a classification fact, not arithmetic: internalised flow has no
+limit of its own, so it lands in the MARKET column. Without the line, comparing
+SILK's market share against agency's would read a difference in execution style
+out of a bookkeeping convention. Edit or add notes in `config.FLOW_NOTES`.
+
 | column | formula |
 |---|---|
 | Day | the trading date |

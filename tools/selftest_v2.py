@@ -184,6 +184,33 @@ def check_two_page_layout(path: str, period) -> list[str]:
             out.append(f"  {name}: no {rule!r} rule -- the tab or the print "
                        f"fallback is missing")
 
+    # A flow that needs something said before its numbers are read says it, at
+    # the top of its section on both pages -- and only for that flow.
+    for flow, note in V.FLOW_NOTES.items():
+        if flow not in period.flows_present:
+            continue
+        if body.count(note) != 2:
+            out.append(f"  {name}: the {flow} note appears {body.count(note)} "
+                       f"time(s), expected once on each page")
+        for page, where in ((page1, "page 1"), (page2, "page 2")):
+            head = page.find(f">{str(flow).title()}<")
+            if head < 0:
+                continue
+            # It has to sit between that flow's heading and its first chart or
+            # table, or it is not annotating what the reader is about to see.
+            after = page[head:head + 900]
+            if note not in after:
+                out.append(f"  {name}: the {flow} note is not at the top of its "
+                           f"{where} section")
+    for flow in period.flows_present:
+        if flow in V.FLOW_NOTES:
+            continue
+        section = page1[page1.find(f">{str(flow).title()}<"):][:900]
+        for other in V.FLOW_NOTES.values():
+            if other in section:
+                out.append(f"  {name}: the note for another flow leaked into "
+                           f"{flow}'s section")
+
     # Both flows get their own chart section, and their own client chart.
     flows = period.flows_present
     for flow in flows:

@@ -93,6 +93,18 @@ OTYPES = (OTYPE_MARKET, OTYPE_LIMIT)
 #: agency split is derived from, so a basket belongs to exactly one flow.
 CLIENT_COLUMN = "basket"
 
+#: A line printed at the top of a flow's section, where that flow needs
+#: something said about it before its numbers are read.
+#:
+#: SILK's is about classification, not arithmetic: internalised flow carries no
+#: limit of its own, so it lands in the MARKET column.  Anyone comparing SILK's
+#: market share against agency's would otherwise be comparing two different
+#: things and drawing a conclusion about execution style from a bookkeeping
+#: convention.  Keyed on the flow name from `casretro.config.flow_of`.
+FLOW_NOTES = {
+    "SILK": "Internalisation is counted as a market order.",
+}
+
 #: How many clients each flow's table shows.
 TOP_CLIENTS = 5
 

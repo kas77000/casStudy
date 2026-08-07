@@ -78,7 +78,15 @@ _PAGES_CSS = """
 .flowhead{font-size:14px;font-weight:650;margin:26px 0 2px;}
 .flowhead .sub2{font-weight:400;color:var(--text-muted);font-size:12.5px;
  margin-left:8px;}
+.flownote{font-size:12.5px;color:var(--text-secondary);margin:0 0 10px;
+ padding-left:10px;border-left:2px solid var(--border);}
 """
+
+
+def _flow_note(flow) -> str:
+    """The line a flow needs said before its numbers are read, if it has one."""
+    note = V.FLOW_NOTES.get(str(flow))
+    return f'<p class="flownote">{_esc(note)}</p>' if note else ""
 
 
 def _tabs() -> str:
@@ -174,7 +182,7 @@ def _hbar_chart(
 # Page 1 -- the charts                                                         #
 # --------------------------------------------------------------------------- #
 
-def _charts_for(sub: pd.DataFrame, title: str, note: str) -> str:
+def _charts_for(sub: pd.DataFrame, title: str, note: str, flow=None) -> str:
     """Market and limit side by side, for one flow (or for everything)."""
     charts = []
     for otype in V.OTYPES:
@@ -197,7 +205,8 @@ def _charts_for(sub: pd.DataFrame, title: str, note: str) -> str:
                       f'{_stacked_day_chart(rows)}</div></div>')
 
     return (f'<p class="flowhead">{_esc(title)}<span class="sub2">{_esc(note)}</span></p>'
-            f'<div class="grid2">{"".join(charts)}</div>')
+            + _flow_note(flow)
+            + f'<div class="grid2">{"".join(charts)}</div>')
 
 
 def _execution_charts(data: PeriodData) -> str:
@@ -218,7 +227,8 @@ def _execution_charts(data: PeriodData) -> str:
     flows = data.flows_present
     if len(flows) <= 1:
         only = flows[0] if flows else data.flow
-        return intro + _charts_for(fl, str(only).title(), "market and limit")
+        return intro + _charts_for(fl, str(only).title(), "market and limit",
+                                   flow=only)
 
     # Both flows: a section each, so SILK and agency are never read as one book.
     out = [intro]
@@ -226,7 +236,8 @@ def _execution_charts(data: PeriodData) -> str:
         sub = fl[fl["flow"] == flow]
         traded = _usd(pd.to_numeric(sub["exec_notional_usd"], errors="coerce").sum())
         out.append(_charts_for(sub, str(flow).title(),
-                               f"market and limit · {traded} traded in the close"))
+                               f"market and limit · {traded} traded in the close",
+                               flow=flow))
     return "".join(out)
 
 
@@ -316,8 +327,10 @@ def _execution_tables(data: PeriodData) -> str:
 
     # One flow: the combined tables already are that flow's tables.
     if len(flows) <= 1 or fl is None or fl.empty:
-        only = str(flows[0]).title() if flows else _flow_label(data.flow)
-        return (f'<p class="flowhead">{_esc(only)}</p>' if flows else "") + _eq_pair(eq)
+        only = flows[0] if flows else None
+        head = (f'<p class="flowhead">{_esc(str(only).title())}</p>' + _flow_note(only)
+                if only else "")
+        return head + _eq_pair(eq)
 
     parts = ['<p class="take">Each flow on its own, then the two together. '
              'SILK and agency fill at different rates, so the combined row '
@@ -327,6 +340,7 @@ def _execution_tables(data: PeriodData) -> str:
         traded = _usd(pd.to_numeric(sub["exec_notional_usd"], errors="coerce").sum())
         parts.append(f'<p class="flowhead">{_esc(str(flow).title())}'
                      f'<span class="sub2">{_esc(traded)} traded in the close</span></p>')
+        parts.append(_flow_note(flow))
         parts.append(_eq_pair(sub))
 
     parts.append('<p class="flowhead">All flows'
