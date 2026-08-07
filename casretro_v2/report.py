@@ -311,7 +311,7 @@ def _kpis(data: PeriodData) -> str:
     tiles = [
         _tile("Notional executed in the close", _usd(k["exec_notional_usd"]),
               split or f"{_qty(k['exec_qty'])} shares"),
-        _tile("Notional sent to the auction", _usd(k["sent_notional_usd"]),
+        _tile("Notional of those orders", _usd(k["sent_notional_usd"]),
               f"{_qty(k['sent_qty'])} shares · {k['n_orders']:,} orders"),
         _tile("Fill rate", _pct(k["fill_rate_notional_pct"]),
               f"of notional · {_pct(k['fill_rate_qty_pct'])} of shares"),
@@ -322,7 +322,7 @@ def _kpis(data: PeriodData) -> str:
                  if _ok(k.get("auction_coverage_pct"))
                  and k["auction_coverage_pct"] < 99.5 else "")),
         _tile("Not executed", _usd(k["unfilled_notional_usd"]),
-              "sent to the close and left unfilled"),
+              "the balance of those orders that did not trade"),
     ]
 
     foot = f"{k['n_syms']:,} names · {who}"
@@ -339,10 +339,12 @@ def _execution_quality(data: PeriodData) -> str:
 
     totals = M.execution_quality_totals(eq)
     parts = [
-        '<p class="take">One bar per day, in shares: what we sent to the auction, '
-        'split into the part that traded and the part that did not. The number '
-        'above each bar is the fill ratio &mdash; executed over sent. The tables '
-        'carry the same days in USD.</p>',
+        '<p class="take">One bar per day, in shares: the size of the orders that '
+        'competed in the auction, split into the part that traded and the part '
+        'that did not. The number above each bar is the fill ratio &mdash; '
+        'executed over sent. The tables carry the same days in USD. Orders that '
+        'traded nothing at all are not counted &mdash; they never competed, and '
+        'including them would measure intent rather than execution.</p>',
         _legend([("Executed", SERIES_EXECUTED), ("Sent, not executed", SERIES_UNFILLED)]),
     ]
 
@@ -519,11 +521,14 @@ def write_html(data: PeriodData, path: str) -> str:
         _flows(data),
         f"<h2>Top {V.TOP_CLIENTS} clients</h2>",
         _clients(data),
-        f'<p class="foot">Covers child orders sent to a CLOSE venue only. '
-        f'Executed quantity is priced at the fill price off the execution tape; '
-        f'unfilled quantity at the child order&rsquo;s own price for limit '
-        f'orders, and at the auction&rsquo;s closing price for market orders, '
-        f'which carry none. Market close volume is every print from '
+        f'<p class="foot">Covers child orders sent to a CLOSE venue that traded '
+        f'at least in part and were still on the market after '
+        f'{_esc(_ist(V.OFF_MARKET_AFTER))}; a limit order also has to have been '
+        f'priced at or through the price it achieved. Quantities are the order&rsquo;s '
+        f'own &mdash; size sent, make executed &mdash; at its average fill price. '
+        f'Unfilled quantity is valued at the child order&rsquo;s own price for '
+        f'limit orders, and at the auction&rsquo;s closing price for market '
+        f'orders, which carry none. Market close volume is every print from '
         f'{_esc(_ist(V.CLOSE_VOLUME_FROM))} to the end of the day; the closing '
         f'price is the first print between '
         f'{_esc(_ist(V.CLOSE_PRICE_WINDOW[0]))} and '

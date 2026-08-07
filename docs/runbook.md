@@ -156,7 +156,7 @@ python -m casretro_v2 --flow silk --fx divide
 ```
 
 > **Verifying it.** [`casretro_v2_method.md`](casretro_v2_method.md) documents
-> every element of the page: the seven queries with their exact q text, the
+> every element of the page: the six queries with their exact q text, the
 > child-order frame each number is aggregated from, the formula behind every
 > tile, chart and column, and the limits worth knowing before quoting a figure.
 
@@ -171,11 +171,21 @@ place in the repo that knows what a week is.
 | **Flows** | one row per day × flow × type: orders, child orders, notional traded in the close, fill rate, distinct symbols, and the market's own close volume and notional in those same names |
 | **Top 5 clients** | the biggest baskets of each flow by notional traded in the close — SILK and Agency as separate tables when the run is `--flow both` |
 
-**How things are priced.** Executed quantity at the fill price off the execution
-table. Unfilled quantity at the child order's own price off the workorder — and
-for a market order, which carries no price to be unfilled at, at the auction's
-closing price. The page reports how much of the total rests on that substitution
-rather than burying it.
+**Which orders count.** Taken from the desk's own `temp.q` and applied
+server-side: child orders on a CLOSE venue that **traded something**
+(`make > 0`), whose `make <= size`, that were still on the market after 17:58,
+and — for limit orders — whose limit was at or through the price achieved. So
+the fill rate answers *"of the orders that competed in the auction, what
+fraction of their size filled"*, not *"of everything pointed at the close, what
+landed"*.
+
+**Pricing.** Quantities are the order's own: `workorder.size` sent,
+`workorder.make` executed, at `workorder.avg_fill_price`. The `execution` table
+is not queried — summing fills by `id_work` answers the same question a second
+way and the two can disagree, so one source is used and named. Unfilled quantity
+is valued at the child order's own price for limits, and at the auction's
+closing price for market orders, which carry none; the page reports how much of
+the total rests on that substitution.
 
 **The market side**, from `qatt`, per symbol per day:
 

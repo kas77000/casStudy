@@ -5,10 +5,12 @@ Builds a three-day fixture whose every number is known by hand, pushes it
 through `build_children`, the three measures and the writer, and asserts the
 arithmetic the page rests on:
 
-  * a child order's event log collapses to one row, so an amended order is
-    counted once and not once per amendment;
-  * executed quantity is priced off the fill tape, unfilled limit quantity off
-    the workorder, and unfilled market quantity off the auction close;
+  * the close population predicate still says what `temp.q` says -- it is the
+    denominator of every fill rate on the page;
+  * quantities come off the workorder (`size` sent, `make` executed) and the
+    execution tape is not re-added behind them;
+  * unfilled limit quantity is priced at the order's own price and unfilled
+    market quantity at the auction close;
   * fill ratios are computed from summed quantities, never averaged from daily
     ratios;
   * USD conversion survives either direction of the fx_last quote;
@@ -44,11 +46,15 @@ DATES = [dt.date(2026, 8, 3), dt.date(2026, 8, 4), dt.date(2026, 8, 5)]
 
 FX_INR = 85.0          # INR per USD, the "divide" direction
 CLOSE_PX = 100.0       # what the auction prints, every sym, every day
-LIMIT_PX = 99.0        # what our unfilled limit child orders were priced at
-FILL_PX = 100.5        # what our fills got
+LIMIT_PX = 101.0       # our limit price -- at or through the fill, so marketable
+FILL_PX = 100.5        # workorder.avg_fill_price
 
-#: (id_work, id_target, sym, basket, otype, sent, filled)
-#: 501 is the amended one: it appears twice in the workorder log.
+#: (id_work, id_target, sym, basket, otype, size, make)
+#: These are rows that have ALREADY passed the server-side filter in
+#: `loaders.load_close_workorders`: close venue, make > 0, make <= size,
+#: t_off_market after 17:58, and a marketable limit.  The filter itself is q, so
+#: it is checked against the generated query text in `check_close_workorder_query`
+#: rather than reproduced here in pandas -- one definition, not two.
 CHILDREN = [
     (501, 101, "RELIANCE.IN", "SILK_ASIA",  "limit",  10_000, 6_000),
     (502, 102, "TCS.IN",      "SILK_ASIA",  "market",  5_000, 5_000),
@@ -59,48 +65,18 @@ CHILDREN = [
 SYMS = sorted({c[2] for c in CHILDREN})
 
 
-def build_workorders(date: dt.date) -> pd.DataFrame:
+def build_close_workorders(date: dt.date) -> pd.DataFrame:
+    """What `load_close_workorders` hands back: one row per surviving child."""
     rows = []
-    for id_work, id_target, sym, _basket, otype, sent, _filled in CHILDREN:
-        base = {
-            "date": date, "id_work": id_work, "id_target": id_target, "sym": sym,
-            "venue": "NSE_CLOSE", "venuetype": "CLOSE", "otype": otype,
-            "size": sent, "price": LIMIT_PX if otype == "limit" else np.nan,
-            "state": "filled", "side": "buy",
-        }
-        if id_work == 501:
-            # The event log: an amend, then the final state.  Summing `size`
-            # across both would report 20,000 sent for a 10,000-share order.
-            rows.append({**base, "time": pd.Timedelta("17:51:00"), "size": 9_000,
-                         "state": "sent"})
-            rows.append({**base, "time": pd.Timedelta("17:53:00")})
-        else:
-            rows.append({**base, "time": pd.Timedelta("17:52:00")})
-    # A continuous child order, which every v2 number must ignore.
-    rows.append({
-        "date": date, "id_work": 599, "id_target": 101, "sym": "RELIANCE.IN",
-        "venue": "NSE", "venuetype": "LIT", "otype": "limit", "size": 50_000,
-        "price": 98.0, "state": "filled", "side": "buy",
-        "time": pd.Timedelta("10:00:00"),
-    })
-    return pd.DataFrame(rows)
-
-
-def build_executions(date: dt.date) -> pd.DataFrame:
-    rows = []
-    for id_work, id_target, sym, _basket, _otype, _sent, filled in CHILDREN:
-        if filled <= 0:
-            continue
+    for id_work, id_target, sym, _basket, otype, size, make in CHILDREN:
         rows.append({
-            "date": date, "time": pd.Timedelta("18:00:01"), "id_work": id_work,
-            "id_target": id_target, "sym": sym, "fillsize": filled,
-            "fillprice": FILL_PX, "ostat": "fill", "side": "buy",
+            "date": date, "id_target": id_target, "id_work": id_work, "sym": sym,
+            "side": "buy", "otype": otype, "venue": "NSE_CLOSE",
+            "size": float(size), "make": float(make),
+            "price": LIMIT_PX if otype == "limit" else np.nan,
+            "avg_fill_price": FILL_PX,
+            "t_off_market": pd.Timedelta("18:02:00"),
         })
-    rows.append({
-        "date": date, "time": pd.Timedelta("10:00:01"), "id_work": 599,
-        "id_target": 101, "sym": "RELIANCE.IN", "fillsize": 50_000,
-        "fillprice": 98.0, "ostat": "fill", "side": "buy",
-    })
     return pd.DataFrame(rows)
 
 
@@ -133,8 +109,7 @@ def build_universe() -> pd.DataFrame:
 def day(date: dt.date, factors: pd.DataFrame) -> B.DayData:
     market = build_market(date)
     children = B.build_children(
-        date, build_targets(), build_workorders(date), build_executions(date),
-        market, factors,
+        date, build_targets(), build_close_workorders(date), market, factors,
     )
     return B.DayData(date=date, children=children, market=market,
                      universe=build_universe(), fx_factors=factors, mode="ht")
@@ -142,6 +117,67 @@ def day(date: dt.date, factors: pd.DataFrame) -> B.DayData:
 
 def close(a, b, tol=1e-6) -> bool:
     return a is not None and b is not None and abs(float(a) - float(b)) <= tol
+
+
+def check_close_workorder_query() -> list[str]:
+    """The population predicate, asserted against the q that goes on the wire.
+
+    This is the single most consequential thing in the report -- it is the
+    denominator of every fill rate -- and it lives in q, so it cannot be
+    exercised by a pandas fixture.  What can be checked without a database is
+    that the query still *says* what `temp.q` says, which is what catches a
+    predicate being dropped or inverted in an edit.
+    """
+    out: list[str] = []
+    from casretro import kdbio as K
+    from casretro import loaders as L
+    from casretro_v2 import loaders as VL
+
+    real_require, real_sym = K.require_pykx, K.sym_vector
+    K.require_pykx = lambda: None
+    K.sym_vector = lambda v: list(v)
+
+    class Rec:
+        def __init__(self, inst, cols):
+            self.instance, self._cols, self.q = inst, cols, None
+        def columns_of(self, t): return self._cols
+        def query_pd(self, expr, *a):
+            self.q = expr
+            return pd.DataFrame()
+
+    try:
+        inst = C.Instance(role="oms", mode="ht", label="OMS", host="h", port=1,
+                          partitioned=True, tables={"workorder": "workorder"})
+        conn = Rec(inst, L.WORKORDER_COLS)
+        VL.load_close_workorders(conn, DATES[0], ["A.IN"])
+        q = " ".join((conn.q or "").split())
+    finally:
+        K.require_pykx, K.sym_vector = real_require, real_sym
+
+    for token, why in (
+        ('venue like "*CLOSE*"', "the auction, not continuous"),
+        ("make <= size", "a child order cannot fill more than it asked for"),
+        ("make > 0", "orders that traded nothing must not sit in the denominator"),
+        ("t_off_market > `time$t", "it had to be live when the auction could freeze"),
+        ("(otype<>`limit)", "market orders are exempt from the marketability test"),
+        ("((side=`sell) & price <= avg_fill_price)", "a sell limit at or below its fill"),
+        ("((side=`buy) & price >= avg_fill_price)", "a buy limit at or above its fill"),
+        ("date=d", "the day"),
+        ("sym in syms", "the universe"),
+    ):
+        if " ".join(token.split()) not in q:
+            out.append(f"  close query: no {token!r} -- {why}")
+
+    for col in ("size", "make", "avg_fill_price", "price", "t_off_market"):
+        if col not in q:
+            out.append(f"  close query: {col} is not selected, but is read downstream")
+
+    # The cutoff pushed to the server is the configured one, not a literal.
+    from casretro import kdbio as K2
+    if K2.time_ms(V.OFF_MARKET_AFTER) != 64680000:
+        out.append(f"  close query: the off-market cutoff is "
+                   f"{V.OFF_MARKET_AFTER}, expected 17:58 HKT")
+    return out
 
 
 def check_fallback(factors: pd.DataFrame) -> list[str]:
@@ -440,6 +476,7 @@ def main() -> int:
     failures += check_fallback(factors)
     failures += check_clients_are_period_wide()
     failures += check_market_coverage()
+    failures += check_close_workorder_query()
 
     # -- the child-order frame ---------------------------------------------- #
     days = [day(d, factors) for d in DATES]
@@ -447,19 +484,32 @@ def main() -> int:
 
     if len(ch) != len(CHILDREN):
         failures.append(f"  children: {len(ch)} rows for {len(CHILDREN)} close "
-                        f"child orders -- the event log did not collapse, or the "
-                        f"continuous child order was not excluded")
-    if 599 in set(ch["id_work"]):
-        failures.append("  children: a continuous-venue child order reached v2")
+                        f"child orders that came back from the server")
 
-    amended = ch[ch["id_work"] == 501]
-    if not amended.empty and not close(amended["sent_qty"].iloc[0], 10_000):
-        failures.append(f"  children: the amended order reports "
-                        f"{amended['sent_qty'].iloc[0]:,.0f} sent, expected 10,000 "
-                        f"(the last event wins)")
+    # Quantities are the workorder's own, not re-derived from anywhere else:
+    # `size` is what was asked for and `make` is what traded.
+    for id_work, _t, _s, _b, _o, want_sent, want_exec in CHILDREN:
+        row = ch[ch["id_work"] == id_work]
+        if row.empty:
+            failures.append(f"  children: id_work {id_work} is missing")
+            continue
+        r = row.iloc[0]
+        if not close(r["sent_qty"], want_sent):
+            failures.append(f"  children: id_work {id_work} sent {r['sent_qty']:,.0f}, "
+                            f"expected workorder.size = {want_sent:,.0f}")
+        if not close(r["exec_qty"], want_exec):
+            failures.append(f"  children: id_work {id_work} executed "
+                            f"{r['exec_qty']:,.0f}, expected workorder.make = "
+                            f"{want_exec:,.0f}")
+        if not close(r["unfilled_qty"], want_sent - want_exec):
+            failures.append(f"  children: id_work {id_work} unfilled quantity is "
+                            f"not size - make")
+        if not close(r["exec_px"], FILL_PX):
+            failures.append(f"  children: id_work {id_work} priced its execution at "
+                            f"{r['exec_px']}, expected workorder.avg_fill_price")
 
-    # Pricing: executed off the tape, unfilled limit off the workorder,
-    # unfilled market off the auction close.
+    # Pricing: executed at avg_fill_price, unfilled limit at the order's own
+    # price, unfilled market at the auction close.
     for id_work, want_px, want_src in ((501, LIMIT_PX, "workorder"),
                                        (504, CLOSE_PX, "auction close")):
         row = ch[ch["id_work"] == id_work]
@@ -594,10 +644,10 @@ def main() -> int:
         return 1
 
     print("SELFTEST v2 OK")
-    print(f"  children  : {len(ch)} close child orders/day, event log collapsed, "
-          f"continuous excluded")
-    print(f"  pricing   : fills off the tape, unfilled limits off the workorder, "
-          f"unfilled markets off the auction close")
+    print(f"  children  : {len(ch)} close child orders/day, size sent and make "
+          f"executed straight off the workorder")
+    print(f"  pricing   : executions at avg_fill_price, unfilled limits at their "
+          f"own price, unfilled markets at the auction close")
     print(f"  ratios    : computed from summed quantities over {len(DATES)} days")
     print(f"  fx        : both quote directions land on the same USD")
     print(f"  market    : each symbol counted once per day in the denominator")
@@ -609,6 +659,8 @@ def main() -> int:
           f"three small ones")
     print(f"  coverage  : our share of the auction compares like with like, and "
           f"says how much it could compare")
+    print(f"  population: the close query still carries every predicate from "
+          f"temp.q")
     return 0
 
 

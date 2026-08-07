@@ -5,16 +5,26 @@ that talks to kdb, `build_children()` is pure pandas.  That is what lets
 `tools/selftest_v2.py` exercise the three sections of the report against
 synthetic frames with no database in the loop.
 
-The pricing rule the desk asked for, in one place:
+Quantities come off the **workorder**, which is the OMS's own word on the child
+order and what the desk reconciles against:
 
-    executed quantity   priced at the fill price, off the execution tape
-    unfilled quantity   LIMIT  -> the child order's own price, off the workorder
-                        MARKET -> the auction's closing price, off qatt
+    sent      workorder.size
+    executed  workorder.make            at workorder.avg_fill_price
+    unfilled  size - make               LIMIT  -> the order's own price
+                                        MARKET -> the auction's closing price
+
+The execution tape is deliberately *not* re-added by id_work.  Summing fills
+answers the same question a second way, and where the two disagree the report
+would be quoting a number the OMS does not recognise.  One source, named.
 
 A market child order carries no price to be unfilled at, so the auction price is
-what the quantity would have been worth had it traded; that substitution is
+what that quantity would have been worth had it traded; the substitution is
 tagged per row in `unfilled_px_source`, and the page reports how much of the
 total rests on it rather than burying it.
+
+Which child orders count at all is decided server-side by
+`loaders.load_close_workorders` -- see `config` for the four predicates and why
+each one is there.
 """
 
 from __future__ import annotations
@@ -60,60 +70,43 @@ class DayData:
 # Pure                                                                         #
 # --------------------------------------------------------------------------- #
 
-def _first_available(df: pd.DataFrame, cols) -> pd.Series:
-    """The first of `cols` that carries a number, per row."""
-    out = pd.Series(np.nan, index=df.index, dtype=float)
-    for col in cols:
-        if col in df.columns:
-            out = out.fillna(pd.to_numeric(df[col], errors="coerce"))
-    return out
-
-
-def _one_row_per_child(wo: pd.DataFrame) -> pd.DataFrame:
-    """Collapse the child-order event log to one row per `id_work`.
-
-    The workorder table carries one row per *event*, so summing `size` across it
-    counts an amended order once per amendment.  The last event is taken as the
-    child order's final word on itself -- its size, its price, its state.
-    """
-    if wo is None or wo.empty or "id_work" not in wo.columns:
-        return wo if wo is not None else pd.DataFrame()
-    df = wo.copy()
-    if "time" in df.columns:
-        df["_t"] = pd.to_timedelta(df["time"], errors="coerce")
-        df = df.sort_values(["id_work", "_t"], kind="mergesort")
-        df = df.drop(columns=["_t"])
-    return df.groupby("id_work", as_index=False, sort=False).tail(1).reset_index(drop=True)
-
-
 def build_children(
     date: dt.date | None,
     targets: pd.DataFrame,
     wo: pd.DataFrame,
-    ex: pd.DataFrame,
     market: pd.DataFrame | None = None,
     fx_factors: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """One row per close child order, with quantities and notionals attached."""
-    wo = CL.enrich_workorders(wo if wo is not None else pd.DataFrame())
-    ex = CL.enrich_executions(ex if ex is not None else pd.DataFrame(), wo)
+    """One row per close child order, with quantities and notionals attached.
 
-    if wo is None or wo.empty or "is_close" not in wo.columns:
-        return pd.DataFrame(columns=CHILD_COLS)
-    close = wo[wo["is_close"]]
-    if close.empty:
+    `wo` is already the filtered population -- `loaders.load_close_workorders`
+    applied the venue, `make`, `size` and `t_off_market` predicates server-side.
+    Nothing here narrows it further; this only derives.
+    """
+    if wo is None or wo.empty:
         return pd.DataFrame(columns=CHILD_COLS)
 
-    df = _one_row_per_child(close)
+    df = wo.copy()
     df["date"] = date
     df["sym"] = df.get("sym", "").astype(str)
     df["otype_kind"] = df.get("otype", "").map(CL.otype_kind)
+
+    # `size` is what the child order asked for and `make` what it got -- the
+    # OMS's own word on itself, which is what the desk reconciles against.  The
+    # execution tape is deliberately not re-added here: summing fills by id_work
+    # answers the same question a second way and the two can disagree, so the
+    # report quotes one of them and names which.
     df["sent_qty"] = pd.to_numeric(df.get("size"), errors="coerce").fillna(0.0)
-    df["wo_price"] = _first_available(df, ("price", "limit_target", "limit_candidate"))
+    df["exec_qty"] = pd.to_numeric(df.get("make"), errors="coerce").fillna(0.0)
+    df["unfilled_qty"] = (df["sent_qty"] - df["exec_qty"]).clip(lower=0.0)
+
+    df["exec_px"] = pd.to_numeric(df.get("avg_fill_price"), errors="coerce")
+    df["wo_price"] = pd.to_numeric(df.get("price"), errors="coerce")
+    df["exec_notional_local"] = df["exec_qty"] * df["exec_px"]
 
     # -- the parent's identity -------------------------------------------- #
     if targets is not None and not targets.empty:
-        keep = [c for c in ("id_target", "basket", "trader", "portfolio", "wave", "side")
+        keep = [c for c in ("id_target", "basket", "trader", "portfolio", "wave")
                 if c in targets.columns]
         parents = targets[keep].drop_duplicates("id_target")
         df = df.merge(parents, on="id_target", how="left", suffixes=("", "_parent"))
@@ -122,27 +115,6 @@ def build_children(
             df[col] = ""
         df[col] = df[col].fillna("").astype(str)
     df["flow"] = df["basket"].map(C.flow_of)
-
-    # -- what actually traded --------------------------------------------- #
-    fills = ex[ex["is_fill"] & ex["is_close"]] if not ex.empty else pd.DataFrame()
-    if not fills.empty and "id_work" in fills.columns:
-        f = fills.copy()
-        f["_notional"] = f["fillsize"] * f["fillprice"]
-        agg = f.groupby("id_work").agg(
-            exec_qty=("fillsize", "sum"),
-            exec_notional_local=("_notional", "sum"),
-            n_fills=("fillsize", "size"),
-        )
-        df = df.merge(agg, left_on="id_work", right_index=True, how="left")
-    for col in ("exec_qty", "exec_notional_local", "n_fills"):
-        if col not in df.columns:
-            df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-
-    df["exec_px"] = np.where(
-        df["exec_qty"] > 0, df["exec_notional_local"] / df["exec_qty"].replace(0, np.nan), np.nan
-    )
-    df["unfilled_qty"] = (df["sent_qty"] - df["exec_qty"]).clip(lower=0.0)
 
     # -- what the unfilled quantity was worth ------------------------------ #
     if market is not None and not market.empty and "mkt_close_px" in market.columns:
@@ -193,8 +165,8 @@ def build_children(
 #: Column order of the child-order frame, and the contract the metrics read.
 CHILD_COLS = [
     "date", "flow", "basket", "sym", "otype_kind", "side", "venue",
-    "id_target", "id_work", "state", "state_kind",
-    "sent_qty", "exec_qty", "unfilled_qty", "n_fills",
+    "id_target", "id_work", "t_off_market",
+    "sent_qty", "exec_qty", "unfilled_qty",
     "wo_price", "exec_px", "mkt_close_px", "unfilled_px", "unfilled_px_source",
     "priced",
     "exec_notional_local", "unfilled_notional_local", "sent_notional_local",
@@ -281,17 +253,36 @@ def load_day(
                 f"dropped ({oms.instance.label} is not partitioned)")
         return out
 
+    # The close child orders, already narrowed to the counting population by the
+    # server (venue, make, size, t_off_market and the limit marketability test).
+    wo = _clip(VL.load_close_workorders(oms, date, syms), "close child orders")
+    say(f"[info] {date}: {len(wo)} close child orders that traded")
+
+    # Parents are read only for the basket, and only for the ones that own a
+    # surviving child order.
     targets = _clip(L.load_targets(oms, date, syms), "targets")
     if not targets.empty:
         targets["flow"] = targets["basket"].map(C.flow_of)
         if flow != "both":
             want = C.FLOW_SILK if flow == "silk" else C.FLOW_AGENCY
             targets = targets[targets["flow"] == want].reset_index(drop=True)
-    ids = sorted(targets["id_target"].dropna().astype(int).unique()) if not targets.empty else []
-    say(f"[info] {date}: {len(targets)} parent orders ({flow})")
+        if not wo.empty and "id_target" in wo.columns:
+            # The flow filter reaches the child orders through this join.
+            wo = wo[wo["id_target"].isin(set(targets["id_target"]))].reset_index(drop=True)
+    say(f"[info] {date}: {len(targets)} parent orders ({flow}), "
+        f"{len(wo)} close child orders after the flow filter")
 
-    wo = _clip(L.load_workorders(oms, date, ids), "workorders") if ids else pd.DataFrame()
-    ex = _clip(L.load_executions(oms, date, ids), "executions") if ids else pd.DataFrame()
+    # One row per child order is the assumption every count rests on.  The
+    # filters make it true in practice -- `t_off_market` is stamped once -- but
+    # it is checked rather than trusted.
+    if not wo.empty and "id_work" in wo.columns:
+        dupes = int(wo["id_work"].duplicated().sum())
+        if dupes:
+            warnings.append(
+                f"{date}: {dupes} child order(s) came back on more than one row "
+                f"after filtering -- their size and make are counted once per "
+                f"row, which will overstate both"
+            )
 
     market = pd.DataFrame(columns=VL.MARKET_COLS)
     try:
@@ -317,7 +308,7 @@ def load_day(
                 f"price and drop out of the market notional"
             )
 
-    children = build_children(date, targets, wo, ex, market, factors)
+    children = build_children(date, targets, wo, market, factors)
     say(f"[info] {date}: {len(children)} close child orders")
 
     if not children.empty:

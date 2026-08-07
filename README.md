@@ -284,10 +284,21 @@ auction, and what was left unfilled — then three sections:
 | **Flows** | one row per day × flow × type: orders, child orders, notional traded in the close, fill rate, distinct symbols, and the market's own close volume and notional in those same names |
 | **Top 5 clients** | the biggest baskets of each flow by notional traded in the close, ranked over the whole period; SILK and Agency separately on a `--flow both` run |
 
-**Pricing.** Executed quantity at the fill price off the execution table.
-Unfilled quantity at the child order's own price off the workorder — and for a
-market order, which carries no price to be unfilled at, at the auction's closing
-price. The page reports how much of the total rests on that substitution.
+**Which orders count.** Taken from the desk's own `temp.q` and applied
+server-side: child orders on a CLOSE venue that **traded something**
+(`make > 0`), whose `make <= size`, that were still on the market after 17:58,
+and — for limit orders — whose limit was at or through the price achieved. So
+the fill rate answers *"of the orders that competed in the auction, what
+fraction of their size filled"*, not *"of everything pointed at the close, what
+landed"*.
+
+**Pricing.** Quantities are the order's own: `workorder.size` sent,
+`workorder.make` executed, at `workorder.avg_fill_price`. The `execution` table
+is not queried — summing fills by `id_work` answers the same question a second
+way and the two can disagree, so one source is used and named. Unfilled quantity
+is valued at the child order's own price for limits, and at the auction's
+closing price for market orders, which carry none; the page reports how much of
+the total rests on that substitution.
 
 **The market side**, from `qatt`, per symbol per day:
 
@@ -310,16 +321,12 @@ recoverable: for a currency far from parity the two candidates are reciprocals
 on opposite sides of 1, so the magnitude names the direction and both readings
 give the same USD number. `--fx divide|multiply` forces it near parity.
 
-Only close-venue child orders are counted, and the child-order event log is
-collapsed to one row per `id_work` first, so an amended order counts once rather
-than once per amendment.
-
 Output: `output/cas_v2_<start>_<end>_<flow>/` — the page, plus the CSVs behind
 every number on it.
 
 **To check the numbers**, [`docs/casretro_v2_method.md`](docs/casretro_v2_method.md)
 maps every element of the page to the query that fed it and the arithmetic that
-produced it: the seven queries with their exact q text, the child-order frame
+produced it: the six queries with their exact q text, the child-order frame
 everything is aggregated from, the formula behind each tile, chart and column,
 the conventions that hold throughout, and the limits worth knowing before
 quoting a figure.

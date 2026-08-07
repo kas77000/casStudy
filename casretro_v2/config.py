@@ -41,6 +41,44 @@ CLOSE_PRICE_WINDOW = (T("17:58"), T("18:00"))
 #: scope -- not filtered late, never loaded into the measure.
 CLOSE_VENUE_ONLY = True
 
+# --------------------------------------------------------------------------- #
+# Which close child orders count                                               #
+# --------------------------------------------------------------------------- #
+#
+# These four predicates are the desk's own definition, taken from `temp.q` and
+# applied server-side so the frame that arrives is already the population being
+# measured.  They matter more than anything else on the page, because they set
+# the denominator of every fill rate:
+#
+#   venue like "*CLOSE*"    the auction, not continuous
+#   make > 0                the order traded something.  A close child order that
+#                           filled nothing is not a bad fill, it is an order that
+#                           never competed -- counting it drags the rate toward
+#                           zero and says nothing about execution.
+#   make <= size            a child order cannot fill more than it asked for;
+#                           a row that says otherwise is bad data, not a 300% fill
+#   t_off_market > 17:58    it was still live when the auction could freeze
+#
+# ...plus the marketability test below, for limit orders only.
+
+#: A close child order counts only if it left the market after this.  17:58 HKT
+#: is the random-close start: before it, an order that has already gone is an
+#: order that was not in the auction.
+OFF_MARKET_AFTER = T("17:58")
+
+#: For a **limit** order, the limit has to have been at or through the price that
+#: was actually achieved -- buy limit at or above it, sell limit at or below it.
+#: A limit that sits the wrong side of its own average fill price is a row whose
+#: `price` and `avg_fill_price` do not describe the same thing, and it would
+#: otherwise land in the denominator as a fill that never could have happened.
+#: Market orders are exempt: they have no limit to test.
+LIMIT_MUST_BE_MARKETABLE = True
+
+#: The q symbol identifying a limit order in `workorder.otype`.  The
+#: marketability test keys off this exact value, as `temp.q` does; every other
+#: `otype` is treated as marketable by definition.
+QTYPE_LIMIT = "limit"
+
 #: Order type buckets, in the order they appear on the page.
 OTYPE_MARKET = "MARKET"
 OTYPE_LIMIT = "LIMIT"

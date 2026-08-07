@@ -13,35 +13,49 @@ Companion documents: [`runbook.md`](runbook.md) (what to run),
 
 ## 0. What the report covers
 
-Three filters decide the population, and **every** number on the page sits
-inside all three.
+Seven predicates decide the population, and **every** number on the page sits
+inside all of them.
 
-| filter | rule | where |
+This is the definition taken from the desk's own `temp.q`, and it is applied
+**server-side** — the frame that arrives is already the population being
+measured, so there is no second, quieter definition applied later in pandas.
+
+| filter | rule | why |
 |---|---|---|
-| **universe** | the CAS ISIN whitelist, NSE `.IN` listings only | `config/cas_isins.txt`, `casretro.config.SYM_SUFFIXES` |
-| **flow** | `--flow silk` / `agency` / `both`; a `basket` containing `SILK` is SILK, anything else is agency | `casretro.config.flow_of` |
-| **venue** | child orders whose `venue` contains `CLOSE`, and nothing else | `casretro.classify.enrich_workorders`, `V.CLOSE_VENUE_ONLY` |
+| **universe** | the CAS ISIN whitelist, NSE `.IN` listings only | `config/cas_isins.txt` |
+| **flow** | `--flow silk` / `agency` / `both`; a `basket` containing `SILK` is SILK, anything else is agency | joined from `target` |
+| **venue** | `venue like "*CLOSE*"` | the auction, not continuous |
+| **traded** | `make > 0` | a close child order that filled nothing never competed; counting it drags every fill rate toward zero and says nothing about execution |
+| **sane** | `make <= size` | a child order cannot fill more than it asked for; a row saying otherwise is bad data, not a 300% fill |
+| **live into the auction** | `t_off_market > 17:58` | it was still on the market when the auction could freeze |
+| **marketable limit** | buy: `price >= avg_fill_price`; sell: `price <= avg_fill_price` | a limit sitting the wrong side of its own average fill price is a row whose `price` and `avg_fill_price` do not describe the same thing. **Market orders are exempt** — they have no limit to test |
 
-The venue filter is the important one. **A continuous child order is never
-counted anywhere on this page**, however late it traded. The clock has no vote:
-a close child order is close because of its venue, not because of its timestamp.
+Two consequences worth stating plainly, because they decide what every ratio on
+the page means:
 
-There is no "did it execute" filter. A close child order that filled nothing is
-still on the page — that is the whole point of the fill ratio.
+* **A continuous child order is never counted**, however late it traded. The
+  clock has no vote — a close child order is close because of its venue.
+* **The fill rate is measured over orders that traded**, not over everything
+  sent. It answers *"of the orders that competed in the auction, what fraction of
+  their size filled"*, not *"of everything we pointed at the close, what
+  landed"*. The second question has a far larger denominator and a far smaller
+  answer; it is not what this page reports.
+
+`config.OFF_MARKET_AFTER` and `config.LIMIT_MUST_BE_MARKETABLE` move these.
 
 ---
 
 ## 1. The queries
 
-Seven, and no others. Every one is a q lambda with explicit parameters; nothing
+Six, and no others. Every one is a q lambda with explicit parameters; nothing
 is interpolated into a query except table and column *names*. Symbols and ids go
 in chunks of 500 / 2000. Run any report with `--show-queries 2> queries.log` to
 see these on the wire with their arguments and timings.
 
 ### 1.1 Parent orders — `target`
 
-Called once per day. Used only to attach `basket` (and therefore flow) to each
-child order.
+Called once per day. Used **only** to attach `basket` (and therefore flow) to
+each child order — no quantity, price or state is taken from it.
 
 ```q
 {[d;syms] select date, id_server, time, id_target, trader, basket, portfolio,
@@ -52,31 +66,46 @@ child order.
  from target where date=d, sym in syms }
 ```
 
-### 1.2 Child orders — `workorder`
+### 1.2 Close child orders — `workorder` ← **the important one**
 
-Called once per day, for the `id_target`s returned above.
-
-```q
-{[d;ids] select date, time, id_work, id_target, id_candidate, id_ref, id_cxl,
-   trader, request, oes_oid, oes_primoid, sym, side, size, display, tif, otype,
-   price, limit_target, limit_candidate, bps_candidate, venue, venuetype, state,
-   count_send, count_chaseprice, make, avg_fill_price, t_gen, t_start, t_end,
-   t_transmit, t_oes_send, t_on_market, t_off_market, t_close, …
- from workorder where date=d, id_target in ids }
-```
-
-### 1.3 Executions — `execution`
-
-Called once per day, same ids.
+This query *is* the population of §0. It carries every predicate, so the report
+quotes the numbers `temp.q` returns. Selected by `sym`, not by parent id, which
+is why it runs without fetching parents first.
 
 ```q
-{[d;ids] select date, time, id_target, id_candidate, id_work, trader, oes_oid,
-   oes_primoid, wave, sym, side, sidesign, size, tif, otype, price, t_algo,
-   t_oes_send, t_oes_real, t_oes_xact, destination, exec_broker, last_mkt,
-   ostat, fillprice, fillsize, cum_apr, cum_qty, comment, target_strike,
-   target_vwap, bidprice, askprice, lastprice, adv1t
- from execution where date=d, id_target in ids }
+{[d;syms;t]
+  select date, id_target, id_work, sym, side, otype, venue,
+         size, make, price, avg_fill_price, t_off_market
+  from workorder
+  where date=d, sym in syms,
+        venue like "*CLOSE*",
+        make <= size,
+        make > 0,
+        t_off_market > `time$t,
+        (
+            (otype<>`limit)
+            |
+            (
+                (otype=`limit)
+                &
+                (
+                    ((side=`sell) & price <= avg_fill_price)
+                    |
+                    ((side=`buy)  & price >= avg_fill_price)
+                )
+            )
+        ) }
 ```
+
+`t = 64680000` ms (17:58:00). **`size` is the quantity sent and `make` the
+quantity executed**, at `avg_fill_price`.
+
+### 1.3 The `execution` table is not queried
+
+Summing `execution.fillsize` by `id_work` answers "how much traded" a second
+way, and where the two disagree the report would be quoting a number the OMS
+does not recognise. `workorder.make` is the OMS's own word on the child order and
+what the desk reconciles against, so it is the one source used — and named.
 
 ### 1.4 Market close **volume** — `qatt`, 17:50 → end of day
 
@@ -121,7 +150,8 @@ list; the FX rate is always query 1.6 regardless.
  from equity where date=d, ((sym like "*.IN")), ID_ISIN in isins }
 ```
 
-**Not queried at all:** `target_state`, `alerts`. v2 needs neither.
+**Not queried at all:** `execution`, `target_state`, `alerts`. v2 needs none of
+them — see §1.3.
 
 ### 1.8 Which instance each day is read from
 
@@ -130,8 +160,8 @@ from the **RT** tapes, falling back to the **HDB** if they no longer hold it.
 Every earlier day is read from the HDB, always. A past day is never read from RT,
 because a real-time tape holds whatever it holds *now*.
 
-Because the RT tables carry no date predicate server-side, `target`, `workorder`
-and `execution` are filtered **row by row** on their `date` column after loading
+Because the RT tables carry no date predicate server-side, `target` and
+`workorder` are filtered **row by row** on their `date` column after loading
 (`days.clip_to_date`). A tape that has already rolled therefore comes back empty
 — and that empty result is what triggers the handover to the HDB.
 
@@ -145,32 +175,32 @@ and `execution` are filtered **row by row** on their `date` column after loading
 ## 2. The child-order frame
 
 Everything on the page is an aggregation of one table: **one row per close child
-order per day**. Built by `build.build_children()`, written to
+order that traded, per day**. Built by `build.build_children()`, written to
 `csv/children.csv` on every run. If a number on the page looks wrong, this is
 the file to open.
 
 ### 2.1 One row per child order
 
-`workorder` carries **one row per event**, so an amended order appears several
-times. The log is collapsed to the **last event per `id_work`** (by `time`)
-before anything is summed. Summing `size` across the raw log would report a
-10,000-share order that was amended once as 19,000 sent.
+`workorder` carries one row per *event*, but `t_off_market` is stamped once, so
+the query's own predicate leaves one row per child order. That assumption is
+**checked, not trusted**: a duplicate `id_work` after filtering is reported as a
+warning, because its `size` and `make` would otherwise be counted twice.
 
 ### 2.2 Columns, and how each is derived
 
 | column | derivation |
 |---|---|
 | `date` | the day being loaded |
-| `sym`, `side`, `venue`, `state` | from the child order's last event |
+| `sym`, `side`, `venue`, `t_off_market` | straight from the child order |
 | `otype_kind` | `workorder.otype` → `MARKET` / `LIMIT` (`classify.otype_kind`; anything unrecognised passes through upper-cased under its own name) |
 | `basket`, `trader`, `portfolio` | from `target`, joined on `id_target` |
 | `flow` | `basket` contains `SILK` → `SILK`, else `AGENCY` |
-| **`sent_qty`** | `workorder.size` of the last event |
-| **`exec_qty`** | Σ `execution.fillsize` for that `id_work`, over fills only (`fillsize > 0`) that are also close |
-| `exec_notional_local` | Σ `fillsize × fillprice`, same rows |
-| `exec_px` | `exec_notional_local / exec_qty` |
+| **`sent_qty`** | **`workorder.size`** |
+| **`exec_qty`** | **`workorder.make`** |
+| `exec_px` | **`workorder.avg_fill_price`** |
+| `exec_notional_local` | `exec_qty × exec_px` |
 | **`unfilled_qty`** | `max(sent_qty − exec_qty, 0)` |
-| `wo_price` | first non-null of `workorder.price`, `limit_target`, `limit_candidate` |
+| `wo_price` | `workorder.price` — the limit |
 | `mkt_close_px` | query 1.5, joined on `sym` |
 | **`unfilled_px`** | **LIMIT → `wo_price`. MARKET → `mkt_close_px`.** See below. |
 | `unfilled_px_source` | which of the two was used, or the fallback that was |
@@ -184,8 +214,8 @@ before anything is summed. Summing `size` across the raw log would report a
 This is the part most worth checking, because it is a decision rather than a
 lookup.
 
-* **Executed quantity is priced at the fill price**, off the execution tape.
-  Never at the close, never at the limit.
+* **Executed quantity is priced at `avg_fill_price`**, off the workorder. Never
+  at the close, never at the limit.
 * **Unfilled LIMIT quantity is priced at the child order's own price**, off the
   workorder. That is the price we were willing to trade at.
 * **Unfilled MARKET quantity is priced at the auction's closing price.** A market
@@ -195,7 +225,7 @@ lookup.
   a note under the Market table).
 
 Fallback order when the preferred price is missing: workorder price → auction
-close → the order's own fill price → unpriced. An unpriced row keeps its
+close → the order's own `avg_fill_price` → unpriced. An unpriced row keeps its
 **quantity** and contributes **no notional** — it is not treated as worth zero.
 
 ---
@@ -280,7 +310,7 @@ thin to every nth bar past about three weeks. The table always carries every day
 | Day | the trading date |
 | Sent | Σ `sent_qty` |
 | Executed | Σ `exec_qty` |
-| Fill ratio | Σ `exec_qty` / Σ `sent_qty` × 100 |
+| Fill ratio | Σ `make` / Σ `size` × 100, over the orders that traded (§0) |
 | Executed notional | Σ `exec_notional_usd` |
 | Total notional sent | Σ `sent_notional_usd` |
 | **Period** row | `metrics.execution_quality_totals()` — the same sums over every day, with the ratio recomputed, **not** the mean of the daily ratios |
@@ -299,7 +329,7 @@ limit orders they should differ, and by a lot.
 | Orders | distinct `id_target` |
 | Child orders | distinct `id_work` |
 | Notional traded in close | Σ `exec_notional_usd` |
-| Fill rate | Σ `exec_qty` / Σ `sent_qty` × 100 — **by shares** |
+| Fill rate | Σ `make` / Σ `size` × 100 — **by shares**, over the orders that traded (§0) |
 | Symbols | distinct `sym` |
 | Market close volume | Σ `mkt_close_qty` over the row's **distinct (date, sym) pairs** |
 | Market notional | Σ `mkt_close_qty × mkt_close_px × fx` over the same pairs |
@@ -388,7 +418,7 @@ Every run writes the frames behind the page:
 
 | file | what it is |
 |---|---|
-| `csv/children.csv` | the base table — one row per close child order, every intermediate column |
+| `csv/children.csv` | the base table — one row per close child order that traded, every intermediate column |
 | `csv/execution_quality.csv` | section 1, per (date, order type) |
 | `csv/flows.csv` | section 2, including `market_coverage_pct` |
 | `csv/top_clients_*.csv` | section 3, per flow |
@@ -397,8 +427,9 @@ Every run writes the frames behind the page:
 `csv/children.csv` reconciles to every other file by summation — that is the
 check to run if a number is disputed.
 
-The selftest asserts, on a fixture whose every value is known by hand: the event
-log collapses; the three pricing rules; ratios from summed quantities; both FX
+The selftest asserts that the close query still carries every predicate from
+`temp.q`, and then, on a fixture whose every value is known by hand: quantities
+taken from `size` and `make`; the pricing rules; ratios from summed quantities; both FX
 directions landing on the same USD; a symbol counted once per day in the
 denominator; the share of the auction holding numerator and denominator to the
 same names; the client ranking being period-wide; and the live day falling back

@@ -32,6 +32,102 @@ from . import config as V
 MARKET_COLS = ["sym", "mkt_close_qty", "mkt_close_notional_local",
                "mkt_close_px", "mkt_close_px_time"]
 
+# --------------------------------------------------------------------------- #
+# The close child orders                                                       #
+# --------------------------------------------------------------------------- #
+
+#: Columns the close-child-order query returns.  `make` is the executed quantity
+#: and `avg_fill_price` the price it executed at -- both off the workorder, which
+#: is the OMS's own word on the child order, rather than re-added from the
+#: execution tape.
+CLOSE_WO_COLS = [
+    "date", "id_target", "id_work", "sym", "side", "otype", "venue",
+    "size", "make", "price", "avg_fill_price", "t_off_market",
+]
+
+#: One q lambda, holding the desk's definition of a close child order that
+#: counts.  Written to match `temp.q` predicate for predicate, so the numbers
+#: this report quotes are the numbers that query returns.
+_CLOSE_WO_Q = """
+{{[{sig}]
+  select {cols} from {tbl}
+  where {where_d}sym in syms,
+        venue like "*CLOSE*",
+        make <= size,
+        make > 0,
+        t_off_market > `time$t{limit_clause} }}
+"""
+
+#: The marketability test, limit orders only.  A separate string so it can be
+#: switched off in config without disturbing the rest of the predicate.
+_LIMIT_CLAUSE = """,
+        (
+            (otype<>`{limit})
+            |
+            (
+                (otype=`{limit})
+                &
+                (
+                    ((side=`sell) & price <= avg_fill_price)
+                    |
+                    ((side=`buy)  & price >= avg_fill_price)
+                )
+            )
+        )"""
+
+
+def load_close_workorders(
+    conn: K.Conn, date: dt.date | None, syms: Sequence[str]
+) -> pd.DataFrame:
+    """Close child orders that traded, filtered the way the desk defines them.
+
+    Filtered **server-side**: the frame that arrives is already the population
+    every number on the page is computed over, so there is no second, quieter
+    definition applied later in pandas.
+
+    Selected by `sym` rather than by parent id, which is what lets this run
+    without first fetching the parent orders -- the parents are joined on
+    afterwards for the basket, and only the ones that own a surviving child
+    order matter.
+    """
+    inst = conn.instance
+    tbl = inst.table("workorder")
+    have = set(conn.columns_of(tbl))
+
+    required = {"sym", "venue", "make", "size", "otype", "side", "price",
+                "avg_fill_price", "t_off_market"}
+    missing = sorted(required - have)
+    if missing:
+        raise SystemExit(
+            f"[fatal] {tbl} has no {', '.join(missing)} column(s). The close "
+            f"population is defined by those columns (see temp.q), so the report "
+            f"cannot be built without them."
+        )
+
+    cols = ", ".join(c for c in CLOSE_WO_COLS if c in have)
+    limit_clause = (
+        _LIMIT_CLAUSE.format(limit=V.QTYPE_LIMIT) if V.LIMIT_MUST_BE_MARKETABLE else ""
+    )
+    sig = "d;syms;t" if inst.partitioned else "syms;t"
+    qry = _CLOSE_WO_Q.format(
+        sig=sig, cols=cols, tbl=tbl, where_d=K.where_date(inst),
+        limit_clause=limit_clause,
+    )
+
+    frames = []
+    for chunk in K.chunks(list(syms), C.SYM_CHUNK):
+        frames.append(conn.query_pd(
+            qry, *K.date_params(inst, date), K.sym_vector(chunk),
+            K.time_ms(V.OFF_MARKET_AFTER),
+        ))
+    df = K.concat(frames)
+    if df.empty:
+        return pd.DataFrame(columns=CLOSE_WO_COLS)
+    for col in ("size", "make", "price", "avg_fill_price"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.reset_index(drop=True)
+
 #: The reference columns the FX rate needs, and nothing else.
 FX_COLS = ["sym", "CRNCY", "fx_last"]
 
