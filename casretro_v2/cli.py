@@ -14,6 +14,7 @@ from casretro import universe as U
 from . import config as V
 from . import period as P
 from . import report as R
+from . import report2 as R2
 
 DESCRIPTION = """\
 Closing-auction execution review -- the trader / client page.
@@ -98,7 +99,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="take every .IN listing instead of the CAS ISIN whitelist")
     ap.add_argument("--out", help="output directory")
     ap.add_argument("--formats", default="html,csv",
-                    help="comma separated subset of html,csv (default: both)")
+                    help="comma separated subset of html,csv (default: both). "
+                         "html writes both layouts: _v1 (one column) and _v2 "
+                         "(charts, then data)")
     ap.add_argument("--show-queries", action="store_true",
                     help="print every q query sent, to stderr")
     ap.add_argument("--quiet", action="store_true", help="suppress progress output")
@@ -201,7 +204,11 @@ def main(argv: list[str] | None = None) -> int:
 
     written: list[str] = []
     if "html" in formats:
-        written.append(R.write_html(data, os.path.join(outdir, f"{base}.html")))
+        # Two layouts, side by side until the newer one has earned the job:
+        #   <base>_v1.html   one column, charts and their tables together
+        #   <base>_v2.html   two pages -- charts, then the data behind them
+        written.append(R.write_html(data, os.path.join(outdir, f"{base}_v1.html")))
+        written.append(R2.write_html(data, os.path.join(outdir, f"{base}_v2.html")))
     if "csv" in formats:
         written += R.write_csvs(data, os.path.join(outdir, "csv"))
 

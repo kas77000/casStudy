@@ -210,8 +210,18 @@ sides of 1, so the magnitude names the direction and both readings land on the
 same USD figure. `--fx divide|multiply` forces it; the rate actually used is
 printed on the page.
 
-Output: `output/cas_v2_<start>_<end>_<flow>/` — the HTML page and the CSVs behind
-every number on it.
+Output: `output/cas_v2_<start>_<end>_<flow>/` — **two layouts** plus the CSVs
+behind every number on them:
+
+| file | layout |
+|---|---|
+| `<base>_v1.html` | one column, each chart followed by its table |
+| `<base>_v2.html` | two pages behind a CSS-only tab: **Overview** (KPIs and every chart) and **Data** (every table) |
+
+`_v2` splits market and limit **per flow** — a section each for SILK and agency
+on a `--flow both` run — and shows the top clients of each flow as horizontal
+bars. It is the intended replacement; `_v1` stays alongside until it has earned
+the job. Printing lays both pages out regardless of the tab.
 
 ```bash
 python tools/selftest_v2.py     # the whole thing on synthetic frames, no kdb

@@ -274,9 +274,9 @@ Weekly by default: every chart is one bar per day, so a period is the natural
 unit. Dates, the business-day calendar and the live-day HT/RT rule live in
 `casretro_v2/days.py`, the only place in the repo that knows what a week is.
 
-A **KPI row** opens the page — notional executed in the close, notional sent,
-fill rate by notional and by shares, the market/limit split, our share of the
-auction, and what was left unfilled — then three sections:
+A **KPI row** opens the page — notional executed in the close, fill rate by
+notional, a tile each for market and limit, and our share of the auction — then
+three sections:
 
 | section | what is on it |
 |---|---|
@@ -321,8 +321,18 @@ recoverable: for a currency far from parity the two candidates are reciprocals
 on opposite sides of 1, so the magnitude names the direction and both readings
 give the same USD number. `--fx divide|multiply` forces it near parity.
 
-Output: `output/cas_v2_<start>_<end>_<flow>/` — the page, plus the CSVs behind
-every number on it.
+Output: `output/cas_v2_<start>_<end>_<flow>/` — **two layouts** plus the CSVs
+behind every number on them:
+
+| file | layout |
+|---|---|
+| `<base>_v1.html` | one column, each chart followed by its table |
+| `<base>_v2.html` | two pages behind a CSS-only tab: **Overview** (KPIs and every chart) and **Data** (every table) |
+
+`_v2` splits market and limit **per flow** — a section each for SILK and agency
+on a `--flow both` run — and shows the top clients of each flow as horizontal
+bars. It is the intended replacement; `_v1` stays alongside until it has earned
+the job. Printing lays both pages out regardless of the tab.
 
 **To check the numbers**, [`docs/casretro_v2_method.md`](docs/casretro_v2_method.md)
 maps every element of the page to the query that fed it and the arithmetic that

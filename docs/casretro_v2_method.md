@@ -255,6 +255,22 @@ rather than joining it at ~85× its true value.
 
 ## 4. The page, element by element
 
+Two layouts are written from the same frames, so they cannot disagree:
+
+| file | layout |
+|---|---|
+| `<base>_v1.html` | one column — each chart followed by its own table |
+| `<base>_v2.html` | two pages behind a CSS-only tab: **Overview** (KPI row and every chart) and **Data** (every table) |
+
+In `_v2`, page 1 draws market and limit **per flow** — one section each for SILK
+and agency on a `--flow both` run, two charts per section — followed by the top
+clients of each flow as horizontal bars in notional. Page 2 carries the same
+tables as `_v1`. Printing ignores the tab and lays both pages out, page 2
+starting on a fresh sheet.
+
+`_v2` is the intended replacement; `_v1` is kept alongside it until it has
+earned the job.
+
 ### 4.1 Header line
 
 `period · N trading days · flow · NSE closing auction · fx note`
@@ -270,19 +286,18 @@ quantities, never averaged across days.
 | tile | formula |
 |---|---|
 | **Notional executed in the close** | Σ `exec_notional_usd`. Note splits it by `otype_kind`. |
-| **Notional sent to the auction** | Σ `sent_notional_usd`. Note: Σ `sent_qty`, distinct `id_target`. |
 | **Fill rate** | Σ `exec_notional_usd` / Σ `sent_notional_usd` × 100 — **by notional**. Note carries Σ `exec_qty` / Σ `sent_qty` × 100, **by shares**. |
-| **By order type** | Σ `exec_qty` / Σ `sent_qty` per `otype_kind` — **by shares**. |
+| **Market** | Σ `make` / Σ `size` × 100 for market orders — **by shares**. Note: Σ `exec_notional_usd` for market. |
+| **Limit** | the same, for limit orders. |
 | **Share of the auction** | see §4.6 — matched numerator and denominator. |
-| **Not executed** | Σ `unfilled_notional_usd`. |
 
 Footer line: distinct `sym`; distinct `basket`; the largest basket's share of
 Σ `exec_notional_usd`; the largest day's share of the same.
 
-> **Watch the two fill rates.** The tile headline is by **notional**; the "by
-> order type" tile and every table column called *Fill rate* / *Fill ratio* are
-> by **shares**. They differ whenever price and fill probability are correlated —
-> in the sample week, 2.5% by notional against 3.4% by shares.
+> **Watch the two fill rates.** The Fill rate tile is by **notional**; the
+> Market and Limit tiles and every table column called *Fill rate* / *Fill ratio*
+> are by **shares**. They differ whenever price and fill probability are
+> correlated.
 
 ### 4.3 Execution Quality — the charts
 

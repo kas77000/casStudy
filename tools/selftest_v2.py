@@ -40,6 +40,7 @@ from casretro_v2 import days as D                    # noqa: E402
 from casretro_v2 import fx as FX                     # noqa: E402
 from casretro_v2 import metrics as M                 # noqa: E402
 from casretro_v2 import report as R                  # noqa: E402
+from casretro_v2 import report2 as R2                # noqa: E402
 from casretro_v2.period import PeriodData, assemble  # noqa: E402
 
 DATES = [dt.date(2026, 8, 3), dt.date(2026, 8, 4), dt.date(2026, 8, 5)]
@@ -117,6 +118,47 @@ def day(date: dt.date, factors: pd.DataFrame) -> B.DayData:
 
 def close(a, b, tol=1e-6) -> bool:
     return a is not None and b is not None and abs(float(a) - float(b)) <= tol
+
+
+def check_two_page_layout(path: str, period) -> list[str]:
+    """The v2 layout: charts on page 1, tables on page 2, no script to run it."""
+    out: list[str] = []
+    body = open(path, encoding="utf-8").read()
+    name = os.path.basename(path)
+
+    page1 = body[body.index('class="page pg-1"'):body.index('class="page pg-2"')]
+    page2 = body[body.index('class="page pg-2"'):]
+
+    # Page 1 is charts, page 2 is tables.  Neither should carry the other's job.
+    if "<svg" not in page1:
+        out.append(f"  {name}: page 1 has no chart")
+    if "<table" in page1:
+        out.append(f"  {name}: page 1 carries a table -- the data belongs on page 2")
+    if "<table" not in page2:
+        out.append(f"  {name}: page 2 has no table")
+    if "<svg" in page2:
+        out.append(f"  {name}: page 2 carries a chart -- the charts belong on page 1")
+
+    # The tab is CSS, not script: an email client that blocks JS must still work.
+    if "<script" in body or "onclick" in body:
+        out.append(f"  {name}: the tab needs script to work")
+    for rule in ("#pg1:checked", "#pg2:checked", "@media print"):
+        if rule not in body:
+            out.append(f"  {name}: no {rule!r} rule -- the tab or the print "
+                       f"fallback is missing")
+
+    # Both flows get their own chart section, and their own client chart.
+    flows = period.flows_present
+    for flow in flows:
+        if str(flow).title() not in page1:
+            out.append(f"  {name}: page 1 has no section for {flow}")
+    n_charts = page1.count("<svg")
+    want = 2 * len(flows) + len(flows)      # market + limit per flow, + clients
+    if n_charts != want:
+        out.append(f"  {name}: page 1 draws {n_charts} charts, expected {want} "
+                   f"({len(flows)} flow(s) x market+limit, plus one client chart "
+                   f"each)")
+    return out
 
 
 def check_close_workorder_query() -> list[str]:
@@ -615,25 +657,32 @@ def main() -> int:
     if ranked != sorted(ranked, reverse=True):
         failures.append("  clients: not ranked by notional traded in the close")
 
-    # -- the writer ---------------------------------------------------------- #
+    # -- the writers --------------------------------------------------------- #
     outdir = args.out or tempfile.mkdtemp(prefix="cas_v2_selftest_")
-    html = R.write_html(period, os.path.join(outdir, "cas_v2_selftest.html"))
+    html = R.write_html(period, os.path.join(outdir, "cas_v2_selftest_v1.html"))
+    html2 = R2.write_html(period, os.path.join(outdir, "cas_v2_selftest_v2.html"))
     R.write_csvs(period, os.path.join(outdir, "csv"))
-    body = open(html, encoding="utf-8").read()
 
-    for token in ("Execution Quality", "Flows", "Top 5 clients", "Market", "Limit"):
-        if token not in body:
-            failures.append(f"  page: no {token!r} section")
-    for token in ("id_work", "id_target", "otype_kind", "nan"):
-        if token in body:
-            failures.append(f"  page: leaks {token!r}")
-    if "<link" in body or 'src="http' in body:
-        failures.append("  page: pulls an external resource -- it must be "
-                        "self-contained to survive being emailed")
+    for path in (html, html2):
+        body = open(path, encoding="utf-8").read()
+        name = os.path.basename(path)
+        for token in ("Execution Quality", "Flows", "Top 5 clients", "Market", "Limit"):
+            if token not in body:
+                failures.append(f"  {name}: no {token!r} section")
+        for token in ("id_work", "id_target", "otype_kind", "nan"):
+            if token in body:
+                failures.append(f"  {name}: leaks {token!r}")
+        if "<link" in body or 'src="http' in body:
+            failures.append(f"  {name}: pulls an external resource -- it must be "
+                            f"self-contained to survive being emailed")
+
+    body = open(html, encoding="utf-8").read()
+    failures += check_two_page_layout(html2, period)
 
     # A single day still renders: one bar per chart.
     one = assemble([days[0]], "both")
-    R.write_html(one, os.path.join(outdir, "cas_v2_selftest_oneday.html"))
+    R.write_html(one, os.path.join(outdir, "cas_v2_selftest_oneday_v1.html"))
+    R2.write_html(one, os.path.join(outdir, "cas_v2_selftest_oneday_v2.html"))
     if one.is_multi_day:
         failures.append("  page: a one-day period reports itself as multi-day")
 
@@ -661,6 +710,8 @@ def main() -> int:
           f"says how much it could compare")
     print(f"  population: the close query still carries every predicate from "
           f"temp.q")
+    print(f"  layout    : v1 and v2 both written; v2 keeps charts on page 1 and "
+          f"tables on page 2, with a CSS-only tab")
     return 0
 
 

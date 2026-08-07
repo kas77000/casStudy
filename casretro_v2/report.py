@@ -301,10 +301,6 @@ def _kpis(data: PeriodData) -> str:
         f"{name.lower()} {_usd(d.get('exec_notional_usd'))}"
         for name, d in ((V.OTYPE_MARKET, mkt), (V.OTYPE_LIMIT, lim)) if d
     )
-    fill_split = " · ".join(
-        f"{name.lower()} {_pct(d.get('fill_rate_qty_pct'))}"
-        for name, d in ((V.OTYPE_MARKET, mkt), (V.OTYPE_LIMIT, lim)) if d
-    )
 
     who = f"{k['n_clients']:,} clients"
     if k.get("top_client_pct") is not None:
@@ -314,21 +310,27 @@ def _kpis(data: PeriodData) -> str:
     if k.get("best_day") is not None:
         best = f"biggest day {_day(k['best_day'])} at {_pct(k.get('best_day_pct'), 0)}"
 
+    # Market and limit get a tile each rather than sharing one: they are the two
+    # halves of the page below, they behave nothing like each other, and two
+    # numbers crammed into a single tile read as a footnote instead of a figure.
+    def otype_tile(name: str, d: dict) -> str:
+        if not d:
+            return _tile(name.title(), "—", "nothing reached the auction")
+        return _tile(name.title(), _pct(d.get("fill_rate_qty_pct")),
+                     f"filled · {_usd(d.get('exec_notional_usd'))} traded")
+
     tiles = [
         _tile("Notional executed in the close", _usd(k["exec_notional_usd"]),
               split or f"{_qty(k['exec_qty'])} shares"),
-        _tile("Notional of those orders", _usd(k["sent_notional_usd"]),
-              f"{_qty(k['sent_qty'])} shares · {k['n_orders']:,} orders"),
         _tile("Fill rate", _pct(k["fill_rate_notional_pct"]),
               f"of notional · {_pct(k['fill_rate_qty_pct'])} of shares"),
-        _tile("By order type", fill_split or "—", "share of what was sent that traded"),
+        otype_tile(V.OTYPE_MARKET, mkt),
+        otype_tile(V.OTYPE_LIMIT, lim),
         _tile("Share of the auction", _pct(k.get("share_of_auction_pct"), 2),
               f"of {_usd(k.get('mkt_close_notional_usd'))} printed in our names"
               + (f" · {_pct(k['auction_coverage_pct'], 0)} of our notional priced"
                  if _ok(k.get("auction_coverage_pct"))
                  and k["auction_coverage_pct"] < 99.5 else "")),
-        _tile("Not executed", _usd(k["unfilled_notional_usd"]),
-              "the balance of those orders that did not trade"),
     ]
 
     foot = f"{k['n_syms']:,} names · {who}"
