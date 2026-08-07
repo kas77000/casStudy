@@ -430,11 +430,10 @@ def write_html(data: PeriodData, path: str) -> str:
         f'{_esc(_ist(V.OFF_MARKET_AFTER))}; a limit order also has to have been '
         f'priced at or through the price it achieved. Quantities are the '
         f'order&rsquo;s own &mdash; size sent, make executed &mdash; at its '
-        f'average fill price. Market close volume is every print from '
-        f'{_esc(_ist(V.CLOSE_VOLUME_FROM))} to the end of the day; the closing '
-        f'price is the first print between '
-        f'{_esc(_ist(V.CLOSE_PRICE_WINDOW[0]))} and '
-        f'{_esc(_ist(V.CLOSE_PRICE_WINDOW[1]))}. '
+        f'average fill price. The auction is measured over '
+        f'{_esc(_ist(V.CLOSE_WINDOW[0]))} to {_esc(_ist(V.CLOSE_WINDOW[1]))}: '
+        f'close volume is the size printed in that window and the closing price '
+        f'the first price in it. Trading-at-last, after 18:00, is excluded. '
         f'Generated {dt.datetime.now():%Y-%m-%d %H:%M}.</p>'
     )
 

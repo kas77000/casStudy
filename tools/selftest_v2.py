@@ -225,6 +225,57 @@ def check_two_page_layout(path: str, period) -> list[str]:
     return out
 
 
+def check_market_window() -> list[str]:
+    """The auction window is 17:58-18:00, and nothing else is counted.
+
+    Trading-at-last prints after 18:00 at the closing price.  Counting it would
+    inflate the denominator our share of the auction is measured against, and
+    the mistake would be invisible on the page -- the share would simply read
+    lower.  So the window is asserted against the arguments actually sent.
+    """
+    out: list[str] = []
+    from casretro import kdbio as K
+    from casretro_v2 import loaders as VL
+
+    real_require, real_sym = K.require_pykx, K.sym_vector
+    K.require_pykx = lambda: None
+    K.sym_vector = lambda v: list(v)
+
+    class Rec:
+        def __init__(self, inst, cols):
+            self.instance, self._cols, self.calls = inst, cols, []
+        def columns_of(self, t): return self._cols
+        def query_pd(self, expr, *a):
+            self.calls.append((expr, a))
+            return pd.DataFrame()
+
+    try:
+        inst = C.Instance(role="qatt", mode="ht", label="QATT", host="h", port=1,
+                          partitioned=True, tables={"qatt": "qatt"})
+        conn = Rec(inst, ["sym", "time", "price", "size"])
+        VL.load_market(conn, DATES[0], ["A.IN"])
+    finally:
+        K.require_pykx, K.sym_vector = real_require, real_sym
+
+    if len(conn.calls) != 1:
+        out.append(f"  market window: {len(conn.calls)} qatt queries, expected 1 "
+                   f"-- volume and price come from the same window")
+        return out
+
+    expr, args = conn.calls[0]
+    t1, t2 = args[-2], args[-1]
+    if (t1, t2) != (K.time_ms(V.CLOSE_WINDOW[0]), K.time_ms(V.CLOSE_WINDOW[1])):
+        out.append(f"  market window: sent {t1}-{t2} ms, expected "
+                   f"{V.CLOSE_WINDOW[0]}-{V.CLOSE_WINDOW[1]}")
+    if (t1, t2) != (64_680_000, 64_800_000):
+        out.append(f"  market window: {V.CLOSE_WINDOW[0]}-{V.CLOSE_WINDOW[1]} is "
+                   f"not 17:58-18:00 HKT -- trading-at-last would be counted")
+    if "time >= `time$t1, time < `time$t2" not in " ".join(str(expr).split()):
+        out.append("  market window: the window is not half-open, so a print on "
+                   "the boundary could be counted twice")
+    return out
+
+
 def check_close_workorder_query() -> list[str]:
     """The population predicate, asserted against the q that goes on the wire.
 
@@ -583,6 +634,7 @@ def main() -> int:
     failures += check_clients_are_period_wide()
     failures += check_market_coverage()
     failures += check_close_workorder_query()
+    failures += check_market_window()
 
     # -- the child-order frame ---------------------------------------------- #
     days = [day(d, factors) for d in DATES]
@@ -778,6 +830,8 @@ def main() -> int:
     print(f"  layout    : v1 and v2 both written; v2 keeps charts on page 1 and "
           f"tables on page 2, with a CSS-only tab")
     print(f"  breakdown : the per-flow tables reconcile to the combined ones")
+    print(f"  auction   : one qatt query over 17:58-18:00 -- trading-at-last is "
+          f"not counted")
     return 0
 
 

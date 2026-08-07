@@ -302,10 +302,16 @@ the total rests on that substitution.
 
 **The market side**, from `qatt`, per symbol per day:
 
-| number | window |
+One window, **17:58–18:00 HKT** (15:28–15:30 IST) — where the auction freezes:
+
+| number | from that window |
 |---|---|
-| close volume | every print from **17:50 HKT** (15:20 IST) to end of day |
-| close price | the **first** print between **17:58 and 18:00 HKT** (15:28–15:30 IST), where the auction freezes |
+| close volume | the **sum** of size printed in it |
+| close price | the **first** price printed in it |
+
+Nothing after 18:00 counts: that is trading-at-last, struck at the closing price
+but not part of the auction, so including it would inflate the denominator our
+share is measured against.
 
 Market notional is close volume × close price. Each row's denominator covers
 **only the symbols that row traded**, and the numerator is held to those same
@@ -336,7 +342,7 @@ the job. Printing lays both pages out regardless of the tab.
 
 **To check the numbers**, [`docs/casretro_v2_method.md`](docs/casretro_v2_method.md)
 maps every element of the page to the query that fed it and the arithmetic that
-produced it: the six queries with their exact q text, the child-order frame
+produced it: the five queries with their exact q text, the child-order frame
 everything is aggregated from, the formula behind each tile, chart and column,
 the conventions that hold throughout, and the limits worth knowing before
 quoting a figure.

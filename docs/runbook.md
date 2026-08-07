@@ -156,7 +156,7 @@ python -m casretro_v2 --flow silk --fx divide
 ```
 
 > **Verifying it.** [`casretro_v2_method.md`](casretro_v2_method.md) documents
-> every element of the page: the six queries with their exact q text, the
+> every element of the page: the five queries with their exact q text, the
 > child-order frame each number is aggregated from, the formula behind every
 > tile, chart and column, and the limits worth knowing before quoting a figure.
 
@@ -189,10 +189,16 @@ the total rests on that substitution.
 
 **The market side**, from `qatt`, per symbol per day:
 
-| number | window |
+One window, **17:58–18:00 HKT** (15:28–15:30 IST) — where the auction freezes:
+
+| number | from that window |
 |---|---|
-| close volume | every print from **17:50 HKT** (15:20 IST) to end of day |
-| close price | the **first** print between **17:58 and 18:00 HKT** (15:28–15:30 IST) — where the auction freezes |
+| close volume | the **sum** of size printed in it |
+| close price | the **first** price printed in it |
+
+Nothing after 18:00 counts: that is trading-at-last, struck at the closing price
+but not part of the auction, so including it would inflate the denominator our
+share is measured against.
 
 Market notional is close volume × close price, so our share is a ratio of two
 numbers struck on the same price. The denominator on any row covers **only the

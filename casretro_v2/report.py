@@ -467,12 +467,11 @@ def _flows(data: PeriodData) -> str:
 
     return (
         '<p class="take">One row per day, flow and order type. Market notional is '
-        'the whole auction <em>in the symbols that row traded</em>: everything '
-        f'printed from {_esc(_ist(V.CLOSE_VOLUME_FROM))} onwards, valued at the '
-        'closing price &mdash; the first print between '
-        f'{_esc(_ist(V.CLOSE_PRICE_WINDOW[0]))} and '
-        f'{_esc(_ist(V.CLOSE_PRICE_WINDOW[1]))}, which is where the auction '
-        'freezes. The volume behind it is in <code>csv/flows.csv</code>.</p>'
+        'the auction itself <em>in the symbols that row traded</em>: everything '
+        f'printed between {_esc(_ist(V.CLOSE_WINDOW[0]))} and '
+        f'{_esc(_ist(V.CLOSE_WINDOW[1]))}, where the auction freezes, valued at '
+        'the first price in that window. Trading-at-last, after 18:00, is not '
+        'counted. The volume behind it is in <code>csv/flows.csv</code>.</p>'
         + _table(head, body, total)
         + '<p class="sub">Because each row&rsquo;s market notional covers only its '
         'own symbols, rows that share a name overlap: that column '
@@ -552,11 +551,10 @@ def write_html(data: PeriodData, path: str) -> str:
         f'own &mdash; size sent, make executed &mdash; at its average fill price. '
         f'Unfilled quantity is valued at the child order&rsquo;s own price for '
         f'limit orders, and at the auction&rsquo;s closing price for market '
-        f'orders, which carry none. Market close volume is every print from '
-        f'{_esc(_ist(V.CLOSE_VOLUME_FROM))} to the end of the day; the closing '
-        f'price is the first print between '
-        f'{_esc(_ist(V.CLOSE_PRICE_WINDOW[0]))} and '
-        f'{_esc(_ist(V.CLOSE_PRICE_WINDOW[1]))}. '
+        f'orders, which carry none. The auction is measured over '
+        f'{_esc(_ist(V.CLOSE_WINDOW[0]))} to {_esc(_ist(V.CLOSE_WINDOW[1]))}: '
+        f'close volume is the size printed in that window and the closing price '
+        f'the first price in it. Trading-at-last, after 18:00, is excluded. '
         f'Generated {dt.datetime.now():%Y-%m-%d %H:%M}.</p>',
     ]
 

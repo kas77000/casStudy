@@ -15,21 +15,29 @@ from casretro.config import T
 # Market windows                                                               #
 # --------------------------------------------------------------------------- #
 
-#: "Close volume" is everything the market printed from here to the end of the
-#: day.  17:50 HKT / 15:20 IST -- the instant auction order entry opens, so the
-#: window is the whole close: the last continuous prints, the auction itself and
-#: the post-close session.
-CLOSE_VOLUME_FROM = T("17:50")
+#: The auction window, and the only market window this report uses.  The auction
+#: freezes at a random instant inside it and the close is struck there, so:
+#:
+#:   close volume   the SUM of size printed in it -- the auction print itself
+#:   close price    the FIRST price printed in it
+#:
+#: Half-open, [17:58, 18:00), matching every other window in the repo so a print
+#: exactly on a boundary is counted once.
+#:
+#: Deliberately stops at 18:00.  What prints after that is trading-at-last --
+#: done at the closing price, but not part of the auction, so counting it would
+#: inflate the denominator our share is measured against.  And it does not start
+#: earlier: 17:50-17:58 is the last of continuous trading, which is what the
+#: auction is being compared *with*, not part of it.
+#:
+#: Same window `casStudy` uses for the auction print, deliberately: two reports
+#: quoting different closing prices for the same day is a bug.
+CLOSE_WINDOW = (T("17:58"), T("18:00"))
 
-#: End of the close-volume window.  End of day rather than 18:30, so a late
-#: print cannot fall silently outside it.
-DAY_END = T("23:59:59.999")
-
-#: "Close price" is the **first** print in this window.  The auction freezes at a
-#: random instant inside it and the close is struck there, so the first print
-#: after 17:58 is the auction price.  Same window `casStudy` uses, deliberately:
-#: two reports quoting different closing prices for the same day is a bug.
-CLOSE_PRICE_WINDOW = (T("17:58"), T("18:00"))
+#: Kept as a name because the price and the volume answer different questions,
+#: even though they now come from one query over one window.
+CLOSE_PRICE_WINDOW = CLOSE_WINDOW
+CLOSE_VOLUME_WINDOW = CLOSE_WINDOW
 
 
 # --------------------------------------------------------------------------- #

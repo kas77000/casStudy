@@ -47,7 +47,7 @@ the page means:
 
 ## 1. The queries
 
-Six, and no others. Every one is a q lambda with explicit parameters; nothing
+Five, and no others. Every one is a q lambda with explicit parameters; nothing
 is interpolated into a query except table and column *names*. Symbols and ids go
 in chunks of 500 / 2000. Run any report with `--show-queries 2> queries.log` to
 see these on the wire with their arguments and timings.
@@ -107,7 +107,9 @@ way, and where the two disagree the report would be quoting a number the OMS
 does not recognise. `workorder.make` is the OMS's own word on the child order and
 what the desk reconciles against, so it is the one source used — and named.
 
-### 1.4 Market close **volume** — `qatt`, 17:50 → end of day
+### 1.4 The auction — `qatt`, 17:58 → 18:00
+
+One query, giving both market numbers:
 
 ```q
 {[d;syms;t1;t2]
@@ -120,15 +122,27 @@ what the desk reconciles against, so it is the one source used — and named.
           not null price, not null size, size > 0 }
 ```
 
-`t1 = 64200000` ms (17:50:00), `t2 = 86399999` ms (23:59:59.999).
-Only `qty` is used, as **`mkt_close_qty`**.
+`t1 = 64680000` ms (17:58:00), `t2 = 64800000` ms (18:00:00). Half-open, so a
+print exactly on a boundary is counted once.
 
-### 1.5 Market close **price** — `qatt`, 17:58 → 18:00
+| used as | from |
+|---|---|
+| **`mkt_close_qty`** — close volume | `qty`, the sum of size printed in the window |
+| **`mkt_close_px`** — closing price | `pxFirst`, the first price printed in it |
 
-The same lambda, different window: `t1 = 64680000` ms (17:58), `t2 = 64800000`
-ms (18:00). Only `pxFirst` is used, as **`mkt_close_px`** — the *first* print
-after 17:58, which is where the auction freezes. Same window `casStudy` uses, so
-two reports cannot quote different closing prices for the same day.
+The window is the auction and nothing else. **Prints after 18:00 are
+trading-at-last** — struck at the closing price, but not part of the auction, so
+counting them would inflate the denominator our share is measured against. It
+does not start earlier either: 17:50–17:58 is the last of continuous trading,
+which is what the auction is compared *with*, not part of it.
+
+Same window `casStudy` uses for the auction print, so two reports cannot quote
+different closing prices for the same day.
+
+### 1.5 *(the second qatt query is gone)*
+
+Volume and price used to come from two windows and two queries. They are one
+window now, so there is one query.
 
 ### 1.6 The day's FX rate — `equity`
 
@@ -368,7 +382,7 @@ limit orders they should differ, and by a lot.
 | Notional traded in close | Σ `exec_notional_usd` |
 | Fill rate | Σ `make` / Σ `size` × 100 — **by shares**, over the orders that traded (§0) |
 | Symbols | distinct `sym` |
-| Market notional | Σ `mkt_close_qty × mkt_close_px × fx` over the row's **distinct (date, sym) pairs**. The volume behind it is `mkt_close_qty` in `csv/flows.csv`; it is not a column on the page. |
+| Market notional | Σ `mkt_close_qty × mkt_close_px × fx` over the row's **distinct (date, sym) pairs** — the auction's own volume, 17:58–18:00, at its own price. The volume behind it is `mkt_close_qty` in `csv/flows.csv`; it is not a column on the page. |
 | % of market notional | see §4.6 |
 | **Period** row | recomputed over the whole period's distinct pairs, **not** summed down the column |
 
@@ -435,7 +449,7 @@ shows how many days each was active so the difference is visible.
 | limit | consequence |
 |---|---|
 | The closing price is the first print in 17:58–18:00, a **proxy** for the auction price | if a name's prints in that window are ordinary continuous trades, its market notional is struck on the wrong price. `casStudy` reports the same diagnostic. |
-| Close volume is everything from 17:50 to end of day | it includes the last continuous minutes and the post-close session, not the auction alone |
+| Close volume is the auction window only, 17:58–18:00 | trading-at-last, after 18:00, is excluded — it prints at the closing price but is not part of the auction |
 | Unfilled market quantity is priced at the auction close | a substitution, not an observation; reported as `substituted_pct` |
 | `fx_last` direction is inferred from magnitude | safe for INR; ambiguous within 0.5–2.0, where the report warns and `--fx` decides |
 | RT `qatt` cannot be date-filtered client-side | the live day's market columns depend on that tape holding one session |
