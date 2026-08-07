@@ -276,7 +276,10 @@ Two layouts are written from the same frames, so they cannot disagree:
 | `<base>_v1.html` | one column — each chart followed by its own table |
 | `<base>_v2.html` | two pages behind a CSS-only tab: **Overview** (KPI row and every chart) and **Data** (every table) |
 
-In `_v2`, page 1 draws market and limit **per flow** — one section each for SILK
+In `_v2`, each flow's heading carries its **share of the auction in its own
+names** beside the flow name (`metrics.flow_totals`), so the headline figure and
+the rows beneath it are the same arithmetic. Page 1 draws market and limit
+**per flow** — one section each for SILK
 and agency on a `--flow both` run, two charts per section — followed by the top
 clients of each flow as horizontal bars in notional. Page 2 carries the same
 tables as `_v1`. Printing ignores the tab and lays both pages out, page 2
@@ -300,13 +303,13 @@ quantities, never averaged across days.
 | tile | formula |
 |---|---|
 | **Notional executed in the close** | Σ `exec_notional_usd`. Note splits it by `otype_kind`. |
-| **Fill rate** | Σ `exec_notional_usd` / Σ `sent_notional_usd` × 100 — **by notional**. Note carries Σ `exec_qty` / Σ `sent_qty` × 100, **by shares**. |
+| **Fill rate** | Σ `exec_notional_usd` / Σ `sent_notional_usd` × 100 — **by notional**. Its note carries the SILK internalization line when SILK is in the report, not a second figure. |
 | **Market** | Σ `make` / Σ `size` × 100 for market orders — **by shares**. Note: Σ `exec_notional_usd` for market. |
 | **Limit** | the same, for limit orders. |
 | **Share of the auction** | see §4.6 — matched numerator and denominator. |
 
-Footer line: distinct `sym`; distinct `basket`; the largest basket's share of
-Σ `exec_notional_usd`; the largest day's share of the same.
+Footer line: distinct `sym`; distinct `basket`; the largest day's share of
+Σ `exec_notional_usd`.
 
 > **Watch the two fill rates.** The Fill rate tile is by **notional**; the
 > Market and Limit tiles and every table column called *Fill rate* / *Fill ratio*
@@ -349,9 +352,9 @@ combined ones, and the selftest asserts it.
 The reason for showing both: SILK and agency fill at different rates, so their
 sum describes neither. A combined 44% can be 60% and 25% side by side.
 
-**A flow may carry a note**, printed at the top of its section on both pages,
-from `config.FLOW_NOTES`. SILK's says *"Internalisation is counted as a market
-order."* — it is a classification fact, not arithmetic: internalised flow has no
+**A flow may carry a note**, printed at the top of its section on both pages —
+and, for SILK, under the headline fill rate as well — from `config.FLOW_NOTES`.
+SILK's says *"Internalization is counted as market execution"*. — it is a classification fact, not arithmetic: internalised flow has no
 limit of its own, so it lands in the MARKET column. Without the line, comparing
 SILK's market share against agency's would read a difference in execution style
 out of a bookkeeping convention. Edit or add notes in `config.FLOW_NOTES`.

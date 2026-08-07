@@ -40,6 +40,7 @@ from casretro_v2 import days as D                    # noqa: E402
 from casretro_v2 import fx as FX                     # noqa: E402
 from casretro_v2 import metrics as M                 # noqa: E402
 from casretro_v2 import report as R                  # noqa: E402
+from casretro_v2.report import _kpis                 # noqa: E402
 from casretro_v2 import report2 as R2                # noqa: E402
 from casretro_v2.period import PeriodData, assemble  # noqa: E402
 
@@ -189,9 +190,17 @@ def check_two_page_layout(path: str, period) -> list[str]:
     for flow, note in V.FLOW_NOTES.items():
         if flow not in period.flows_present:
             continue
-        if body.count(note) != 2:
-            out.append(f"  {name}: the {flow} note appears {body.count(note)} "
-                       f"time(s), expected once on each page")
+        # Once under the headline fill rate (page 1 only), and once at the top of
+        # that flow's section on each page.
+        if page1.count(note) != 2:
+            out.append(f"  {name}: the {flow} note appears {page1.count(note)} "
+                       f"time(s) on page 1, expected two -- the KPI tile and the "
+                       f"flow's section")
+        if page2.count(note) != 1:
+            out.append(f"  {name}: the {flow} note appears {page2.count(note)} "
+                       f"time(s) on page 2, expected one")
+        if note not in _kpis(period):
+            out.append(f"  {name}: the {flow} note is not on the KPI row")
         for page, where in ((page1, "page 1"), (page2, "page 2")):
             head = page.find(f">{str(flow).title()}<")
             if head < 0:

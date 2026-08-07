@@ -110,8 +110,11 @@ CLIENT_COLUMN = "basket"
 #: things and drawing a conclusion about execution style from a bookkeeping
 #: convention.  Keyed on the flow name from `casretro.config.flow_of`.
 FLOW_NOTES = {
-    "SILK": "Internalisation is counted as a market order.",
+    "SILK": "Internalization is counted as market execution",
 }
+
+#: The report's title.
+PAGE_TITLE = "India CAS &ndash; Execution Overview"
 
 #: How many clients each flow's table shows.
 TOP_CLIENTS = 5

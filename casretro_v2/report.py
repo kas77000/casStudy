@@ -319,8 +319,6 @@ def _kpis(data: PeriodData) -> str:
     )
 
     who = f"{k['n_clients']:,} clients"
-    if k.get("top_client_pct") is not None:
-        who += f" · top {_pct(k['top_client_pct'], 0)}"
 
     best = ""
     if k.get("best_day") is not None:
@@ -338,8 +336,11 @@ def _kpis(data: PeriodData) -> str:
     tiles = [
         _tile("Notional executed in the close", _usd(k["exec_notional_usd"]),
               split or f"{_qty(k['exec_qty'])} shares"),
+        # The note under the headline fill rate is the one thing a reader has
+        # to know before comparing SILK's market share with agency's.
         _tile("Fill rate", _pct(k["fill_rate_notional_pct"]),
-              f"of notional · {_pct(k['fill_rate_qty_pct'])} of shares"),
+              V.FLOW_NOTES.get(C.FLOW_SILK, "")
+              if C.FLOW_SILK in M.flows_present(data.children) else ""),
         otype_tile(V.OTYPE_MARKET, mkt),
         otype_tile(V.OTYPE_LIMIT, lim),
         _tile("Share of the auction", _pct(k.get("share_of_auction_pct")),
@@ -365,10 +366,16 @@ def _execution_quality(data: PeriodData) -> str:
     parts = [
         '<p class="take">One bar per day, in shares: the size of the orders that '
         'competed in the auction, split into the part that traded and the part '
-        'that did not. The number above each bar is the fill ratio &mdash; '
-        'executed over sent. The tables carry the same days in USD. Orders that '
-        'traded nothing at all are not counted &mdash; they never competed, and '
-        'including them would measure intent rather than execution.</p>',
+        'that did not. The number above each bar is the fill ratio.</p>'
+        '<p class="take"><b>What is counted.</b> Child orders sent to a closing '
+        'venue that traded at least in part, were still on the market after '
+        f'{_esc(_ist(V.OFF_MARKET_AFTER))} &mdash; the point from which the '
+        'auction can freeze &mdash; and, if they carried a limit, were priced at '
+        'or through the price they achieved. <b>What is not.</b> Continuous '
+        'trading; orders that put nothing away at all, which never competed and '
+        'would drag every ratio toward zero; and any child order already off the '
+        'market before the freeze window opened. Sent is the order&rsquo;s size, '
+        'executed is what it filled, both as the order book records them.</p>',
         _legend([("Executed", SERIES_EXECUTED), ("Sent, not executed", SERIES_UNFILLED)]),
     ]
 
@@ -528,13 +535,12 @@ def _missing(data: PeriodData) -> str:
 
 def write_html(data: PeriodData, path: str) -> str:
     parts: list[str] = [
-        "<h1>Closing auction &ndash; execution review</h1>",
+        f"<h1>{V.PAGE_TITLE}</h1>",
         f'<p class="sub">{_esc(data.label)}'
         + (f' &nbsp;&middot;&nbsp; {len(data.dates)} trading days'
            if data.is_multi_day else "")
         + f' &nbsp;&middot;&nbsp; {_esc(_flow_label(data.flow))}'
         + f' &nbsp;&middot;&nbsp; NSE closing auction'
-        + (f' &nbsp;&middot;&nbsp; {_esc(data.fx_note)}' if data.fx_note else "")
         + "</p>",
         _missing(data),
         _kpis(data),
@@ -554,14 +560,17 @@ def write_html(data: PeriodData, path: str) -> str:
         f'orders, which carry none. The auction is measured over '
         f'{_esc(_ist(V.CLOSE_WINDOW[0]))} to {_esc(_ist(V.CLOSE_WINDOW[1]))}: '
         f'close volume is the size printed in that window and the closing price '
-        f'the first price in it. Trading-at-last, after 18:00, is excluded. '
+        f'the first price in it. Matching completes by '
+        f'{_esc(_ist(C.MATCH_END))}; the post-close and trading-at-last sessions '
+        f'that follow print at the closing price but are not the auction, and '
+        f'are excluded. '
         f'Generated {dt.datetime.now():%Y-%m-%d %H:%M}.</p>',
     ]
 
     doc = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>Closing auction review {_esc(data.label)}</title>"
+        f"<title>India CAS - Execution Overview {_esc(data.label)}</title>"
         f"<style>{_CSS}{_V2_CSS}</style></head>"
         f'<body class="viz-root"><div class="wrap">{"".join(parts)}</div></body></html>'
     )

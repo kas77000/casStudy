@@ -198,6 +198,29 @@ def flows_total(children: pd.DataFrame, market: pd.DataFrame) -> pd.Series | Non
 # 3. Clients                                                                   #
 # --------------------------------------------------------------------------- #
 
+def flow_totals(children: pd.DataFrame, market: pd.DataFrame) -> pd.DataFrame:
+    """Per flow over the whole period: what it traded, and its share of the
+    auction in its own names.
+
+    Same construction as `flows()` one level up, so a flow's headline share and
+    the rows beneath it are the same arithmetic rather than two answers to the
+    same question.
+    """
+    if children is None or children.empty or "flow" not in children.columns:
+        return pd.DataFrame()
+    out = _agg_children(children, ["flow"])
+    denom = _market_for_groups(children, market, ["flow"])
+    if not denom.empty:
+        out = out.merge(denom, on="flow", how="left")
+    for col in _MARKET_COLS:
+        if col not in out.columns:
+            out[col] = np.nan
+    out["our_pct_of_market_notional"] = _pct(
+        out["covered_exec_notional_usd"], out["mkt_close_notional_usd"]
+    )
+    return out
+
+
 def top_clients(
     children: pd.DataFrame,
     market: pd.DataFrame,

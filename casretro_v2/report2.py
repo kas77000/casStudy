@@ -25,6 +25,7 @@ import os
 import numpy as np
 import pandas as pd
 
+from casretro import config as C
 from casretro.report import _CSS, _clip, _esc
 
 from . import config as V
@@ -218,26 +219,43 @@ def _execution_charts(data: PeriodData) -> str:
     intro = (
         '<p class="take">One bar per day, in shares: the size of the orders that '
         'competed in the auction, split into the part that traded and the part '
-        'that did not. The number above each bar is the fill ratio. Orders that '
-        'traded nothing at all are not counted &mdash; they never competed.</p>'
+        'that did not. The number above each bar is the fill ratio.</p>'
+        '<p class="take"><b>What is counted.</b> Child orders sent to a closing '
+        'venue that traded at least in part, were still on the market after '
+        f'{_esc(_ist(V.OFF_MARKET_AFTER))} &mdash; the point from which the '
+        'auction can freeze &mdash; and, if they carried a limit, were priced at '
+        'or through the price they achieved. <b>What is not.</b> Continuous '
+        'trading; orders that put nothing away at all, which never competed and '
+        'would drag every ratio toward zero; and any child order already off the '
+        'market before the freeze window opened. Sent is the order&rsquo;s size, '
+        'executed is what it filled, both as the order book records them.</p>'
         + _legend([("Executed", SERIES_EXECUTED),
                    ("Sent, not executed", SERIES_UNFILLED)])
     )
 
+    # Per-flow headline: its share of the auction in its own names, which is
+    # the number a reader wants beside the flow's name rather than buried in a
+    # table three sections down.
+    totals = M.flow_totals(data.children, data.market)
+
+    def headline(flow) -> str:
+        row = totals[totals["flow"] == flow] if not totals.empty else totals
+        if row is None or row.empty:
+            return "market and limit"
+        r = row.iloc[0]
+        return (f"{_pct(r['our_pct_of_market_notional'])} of the auction · "
+                f"{_usd(r['exec_notional_usd'])} traded")
+
     flows = data.flows_present
     if len(flows) <= 1:
         only = flows[0] if flows else data.flow
-        return intro + _charts_for(fl, str(only).title(), "market and limit",
-                                   flow=only)
+        return intro + _charts_for(fl, str(only).title(), headline(only), flow=only)
 
     # Both flows: a section each, so SILK and agency are never read as one book.
     out = [intro]
     for flow in flows:
         sub = fl[fl["flow"] == flow]
-        traded = _usd(pd.to_numeric(sub["exec_notional_usd"], errors="coerce").sum())
-        out.append(_charts_for(sub, str(flow).title(),
-                               f"market and limit · {traded} traded in the close",
-                               flow=flow))
+        out.append(_charts_for(sub, str(flow).title(), headline(flow), flow=flow))
     return "".join(out)
 
 
@@ -392,13 +410,12 @@ def _missing(data: PeriodData) -> str:
 def write_html(data: PeriodData, path: str) -> str:
     """Write the two-page layout.  Returns the path written."""
     header = (
-        "<h1>Closing auction &ndash; execution review</h1>"
+        f"<h1>{V.PAGE_TITLE}</h1>"
         f'<p class="sub">{_esc(data.label)}'
         + (f' &nbsp;&middot;&nbsp; {len(data.dates)} trading days'
            if data.is_multi_day else "")
         + f' &nbsp;&middot;&nbsp; {_esc(_flow_label(data.flow))}'
         + " &nbsp;&middot;&nbsp; NSE closing auction"
-        + (f' &nbsp;&middot;&nbsp; {_esc(data.fx_note)}' if data.fx_note else "")
         + "</p>"
         + _missing(data)
     )
@@ -433,7 +450,10 @@ def write_html(data: PeriodData, path: str) -> str:
         f'average fill price. The auction is measured over '
         f'{_esc(_ist(V.CLOSE_WINDOW[0]))} to {_esc(_ist(V.CLOSE_WINDOW[1]))}: '
         f'close volume is the size printed in that window and the closing price '
-        f'the first price in it. Trading-at-last, after 18:00, is excluded. '
+        f'the first price in it. Matching completes by '
+        f'{_esc(_ist(C.MATCH_END))}; the post-close and trading-at-last sessions '
+        f'that follow print at the closing price but are not the auction, and '
+        f'are excluded. '
         f'Generated {dt.datetime.now():%Y-%m-%d %H:%M}.</p>'
     )
 
@@ -448,7 +468,7 @@ def write_html(data: PeriodData, path: str) -> str:
     doc = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>Closing auction review {_esc(data.label)}</title>"
+        f"<title>India CAS - Execution Overview {_esc(data.label)}</title>"
         f"<style>{_CSS}{_V2_CSS}{_PAGES_CSS}</style></head>"
         f'<body class="viz-root"><div class="wrap">{body}</div></body></html>'
     )
