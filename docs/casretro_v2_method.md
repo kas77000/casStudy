@@ -299,6 +299,11 @@ Footer line: distinct `sym`; distinct `basket`; the largest basket's share of
 > are by **shares**. They differ whenever price and fill probability are
 > correlated.
 
+**Percentages** everywhere carry at most two decimals with trailing zeros
+dropped — `100%`, `10.7%`, `44.44%`. A value that is not zero but rounds to zero
+at two decimals prints `<0.01%` rather than `0%`, so a small share of the auction
+is never shown as no share at all.
+
 ### 4.3 Execution Quality — the charts
 
 One stacked bar per day, per order type, **in shares**:
@@ -318,7 +323,17 @@ thin to every nth bar past about three weeks. The table always carries every day
 
 ### 4.4 Execution Quality — the tables
 
-`metrics.execution_quality()`, grouped by **(date, otype_kind)**.
+In `_v1`, and in `_v2` on a single-flow run: `metrics.execution_quality()`,
+grouped by **(date, otype_kind)**.
+
+In `_v2` on `--flow both`, the section repeats: **SILK**, then **Agency**, then
+**All flows**. The per-flow tables come from `metrics.flows()` filtered to that
+flow — the same measures, grouped by (date, flow, otype_kind) — and the combined
+tables are `execution_quality()` as before. The per-flow figures sum to the
+combined ones, and the selftest asserts it.
+
+The reason for showing both: SILK and agency fill at different rates, so their
+sum describes neither. A combined 44% can be 60% and 25% side by side.
 
 | column | formula |
 |---|---|
@@ -346,8 +361,7 @@ limit orders they should differ, and by a lot.
 | Notional traded in close | Σ `exec_notional_usd` |
 | Fill rate | Σ `make` / Σ `size` × 100 — **by shares**, over the orders that traded (§0) |
 | Symbols | distinct `sym` |
-| Market close volume | Σ `mkt_close_qty` over the row's **distinct (date, sym) pairs** |
-| Market notional | Σ `mkt_close_qty × mkt_close_px × fx` over the same pairs |
+| Market notional | Σ `mkt_close_qty × mkt_close_px × fx` over the row's **distinct (date, sym) pairs**. The volume behind it is `mkt_close_qty` in `csv/flows.csv`; it is not a column on the page. |
 | % of market notional | see §4.6 |
 | **Period** row | recomputed over the whole period's distinct pairs, **not** summed down the column |
 

@@ -160,7 +160,7 @@ def _hbar_chart(
         end = label_w + w_exec + (gap + w_unf if w_unf > 0 else 0)
         tail = f"{fmt(execd)}"
         if _ok(ratio):
-            tail += f" · {float(ratio):,.1f}%"
+            tail += f" · {_pct(ratio)}"
         out.append(
             f'<text x="{end + 8:.1f}" y="{y + bar_h - 5:.1f}" font-size="12" '
             f'fill="var(--text-primary)">{_esc(tail)}</text>'
@@ -267,18 +267,18 @@ def _client_charts(data: PeriodData) -> str:
 # Page 2 -- the data                                                           #
 # --------------------------------------------------------------------------- #
 
-def _execution_tables(data: PeriodData) -> str:
-    eq = data.execution_quality
-    if eq is None or eq.empty:
-        return '<p class="sub">nothing to show</p>'
-    totals = M.execution_quality_totals(eq)
-
-    head = [("Day", ""), ("Sent", "num"), ("Executed", "num"),
+#: Columns of an execution-quality table, market or limit.
+_EQ_HEAD = [("Day", ""), ("Sent", "num"), ("Executed", "num"),
             ("Fill ratio", "num"), ("Executed notional", "num"),
             ("Total notional sent", "num")]
+
+
+def _eq_pair(frame: pd.DataFrame) -> str:
+    """Market and limit tables side by side, over whatever frame is passed."""
+    totals = M.execution_quality_totals(frame)
     tables = []
     for otype in V.OTYPES:
-        sub = eq[eq["otype_kind"] == otype]
+        sub = frame[frame["otype_kind"] == otype].sort_values("date")
         title = f"<h3>{_esc(otype.title())}</h3>"
         if sub.empty:
             tables.append(f'<div>{title}<p class="sub">nothing to show</p></div>')
@@ -289,15 +289,50 @@ def _execution_tables(data: PeriodData) -> str:
              _usd(r["sent_notional_usd"])]
             for _, r in sub.iterrows()
         ]
-        trow = totals[totals["otype_kind"] == otype]
+        trow = totals[totals["otype_kind"] == otype] if not totals.empty else totals
         total = None
-        if not trow.empty:
+        if trow is not None and not trow.empty:
             t = trow.iloc[0]
             total = ["Period", _qty(t["sent_qty"]), _qty(t["exec_qty"]),
                      _pct(t["fill_rate_pct"]), _usd(t["exec_notional_usd"]),
                      _usd(t["sent_notional_usd"])]
-        tables.append(f"<div>{title}{_table(head, body, total)}</div>")
+        tables.append(f"<div>{title}{_table(_EQ_HEAD, body, total)}</div>")
     return f'<div class="grid2">{"".join(tables)}</div>'
+
+
+def _execution_tables(data: PeriodData) -> str:
+    """Market and limit, per flow -- and combined when the run covers both.
+
+    The combined tables answer "how did the close go", the per-flow ones answer
+    "for whom", and the second question is not recoverable from the first: SILK
+    and agency fill at different rates, so their sum describes neither.
+    """
+    eq = data.execution_quality
+    if eq is None or eq.empty:
+        return '<p class="sub">nothing to show</p>'
+
+    flows = data.flows_present
+    fl = data.flows
+
+    # One flow: the combined tables already are that flow's tables.
+    if len(flows) <= 1 or fl is None or fl.empty:
+        only = str(flows[0]).title() if flows else _flow_label(data.flow)
+        return (f'<p class="flowhead">{_esc(only)}</p>' if flows else "") + _eq_pair(eq)
+
+    parts = ['<p class="take">Each flow on its own, then the two together. '
+             'SILK and agency fill at different rates, so the combined row '
+             'describes neither of them on its own.</p>']
+    for flow in flows:
+        sub = fl[fl["flow"] == flow]
+        traded = _usd(pd.to_numeric(sub["exec_notional_usd"], errors="coerce").sum())
+        parts.append(f'<p class="flowhead">{_esc(str(flow).title())}'
+                     f'<span class="sub2">{_esc(traded)} traded in the close</span></p>')
+        parts.append(_eq_pair(sub))
+
+    parts.append('<p class="flowhead">All flows'
+                 '<span class="sub2">SILK and agency together</span></p>')
+    parts.append(_eq_pair(eq))
+    return "".join(parts)
 
 
 def _client_tables(data: PeriodData) -> str:
@@ -321,7 +356,7 @@ def _client_tables(data: PeriodData) -> str:
             [_esc(str(r[V.CLIENT_COLUMN]) or "(none)"), _qty(r.get("n_days")),
              _qty(r["n_orders"]), _qty(r["n_children"]), _qty(r["n_syms"]),
              _usd(r["exec_notional_usd"]), _pct(r["fill_rate_pct"]),
-             _pct(r["our_pct_of_market_notional"], 3)]
+             _pct(r["our_pct_of_market_notional"])]
             for _, r in top.iterrows()
         ]
         parts.append(_table(head, body))

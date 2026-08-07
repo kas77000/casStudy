@@ -120,6 +120,43 @@ def close(a, b, tol=1e-6) -> bool:
     return a is not None and b is not None and abs(float(a) - float(b)) <= tol
 
 
+def check_flow_breakdown(period) -> list[str]:
+    """The per-flow tables add up to the combined one.
+
+    Page 2 now shows market and limit for each flow *and* for both together.
+    If those disagree the reader has no way to tell which is wrong, so the
+    reconciliation is asserted rather than assumed.
+    """
+    out: list[str] = []
+    eq, fl = period.execution_quality, period.flows
+    if eq is None or eq.empty or fl is None or fl.empty:
+        return ["  breakdown: nothing to reconcile"]
+
+    for otype in V.OTYPES:
+        combined = eq[eq["otype_kind"] == otype]
+        per_flow = fl[fl["otype_kind"] == otype]
+        if combined.empty:
+            continue
+        for col in ("sent_qty", "exec_qty", "exec_notional_usd"):
+            want = float(pd.to_numeric(combined[col], errors="coerce").sum())
+            got = float(pd.to_numeric(per_flow[col], errors="coerce").sum())
+            if not close(got, want, tol=1e-6 * max(1.0, abs(want))):
+                out.append(f"  breakdown: {otype} {col} is {got:,.2f} across the "
+                           f"flows but {want:,.2f} combined")
+
+    # And each flow really is a strict part, not a copy of the whole.
+    flows = period.flows_present
+    if len(flows) > 1:
+        for flow in flows:
+            sub = fl[fl["flow"] == flow]
+            if sub.empty:
+                out.append(f"  breakdown: {flow} has no rows of its own")
+            elif float(sub["exec_qty"].sum()) >= float(eq["exec_qty"].sum()):
+                out.append(f"  breakdown: {flow} alone accounts for every share "
+                           f"executed -- the flow filter is not reaching the table")
+    return out
+
+
 def check_two_page_layout(path: str, period) -> list[str]:
     """The v2 layout: charts on page 1, tables on page 2, no script to run it."""
     out: list[str] = []
@@ -678,6 +715,7 @@ def main() -> int:
 
     body = open(html, encoding="utf-8").read()
     failures += check_two_page_layout(html2, period)
+    failures += check_flow_breakdown(period)
 
     # A single day still renders: one bar per chart.
     one = assemble([days[0]], "both")
@@ -712,6 +750,7 @@ def main() -> int:
           f"temp.q")
     print(f"  layout    : v1 and v2 both written; v2 keeps charts on page 1 and "
           f"tables on page 2, with a CSS-only tab")
+    print(f"  breakdown : the per-flow tables reconcile to the combined ones")
     return 0
 
 

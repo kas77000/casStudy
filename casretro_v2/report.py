@@ -60,8 +60,24 @@ def _qty(v) -> str:
     return f"{float(v):,.0f}" if _ok(v) else DASH
 
 
-def _pct(v, nd: int = 1) -> str:
-    return f"{float(v):,.{nd}f}%" if _ok(v) else DASH
+def _pct(v, nd: int = 2) -> str:
+    """Two decimals at most, with trailing zeros dropped.
+
+    100.00 reads as 100%, 10.70 as 10.7%, 44.44 stays 44.44%.  A number that is
+    not zero but rounds to zero at two decimals reads `<0.01%` rather than `0%`
+    -- a real 0.004% share of the auction is small, not absent, and the two
+    should not print the same.
+    """
+    if not _ok(v):
+        return DASH
+    x = float(v)
+    if x and abs(x) < 0.5 * 10 ** -nd:
+        sign = "-" if x < 0 else ""
+        return f"{sign}<{10 ** -nd:.{nd}f}%"
+    s = f"{x:,.{nd}f}"
+    if "." in s:                      # only strip a fractional part, never "1,000"
+        s = s.rstrip("0").rstrip(".")
+    return f"{s}%"
 
 
 def _usd(v) -> str:
@@ -194,7 +210,6 @@ def _stacked_day_chart(
     *,
     width: int = 660,
     height: int = 260,
-    ratio_decimals: int = 1,
 ) -> str:
     """One bar per day: executed stacked under unfilled, ratio labelled on top.
 
@@ -207,8 +222,9 @@ def _stacked_day_chart(
     side by side: rendering at roughly the size it is displayed keeps the labels
     at their intended 12px rather than shrinking them with the SVG.
 
-    `ratio_decimals` is 1 by default -- a limit book that fills 0.4% and one that
-    fills 4.1% both round to nothing useful at zero decimals.
+    The ratio is formatted by `_pct`, so it carries up to two decimals and drops
+    trailing zeros: a limit book that fills 0.4% and one that fills 4.1% are told
+    apart, while a clean 100% is not printed as 100.00%.
     """
     rows = [r for r in rows if _ok(r[1]) or _ok(r[2])]
     if not rows:
@@ -264,7 +280,7 @@ def _stacked_day_chart(
             out.append(
                 f'<text x="{cx:.1f}" y="{top - 8:.1f}" text-anchor="middle" '
                 f'font-size="12" font-weight="600" fill="var(--text-primary)">'
-                f'{float(ratio):,.{ratio_decimals}f}%</text>'
+                f'{_pct(ratio)}</text>'
             )
         if i % stride == 0:
             out.append(
@@ -326,7 +342,7 @@ def _kpis(data: PeriodData) -> str:
               f"of notional · {_pct(k['fill_rate_qty_pct'])} of shares"),
         otype_tile(V.OTYPE_MARKET, mkt),
         otype_tile(V.OTYPE_LIMIT, lim),
-        _tile("Share of the auction", _pct(k.get("share_of_auction_pct"), 2),
+        _tile("Share of the auction", _pct(k.get("share_of_auction_pct")),
               f"of {_usd(k.get('mkt_close_notional_usd'))} printed in our names"
               + (f" · {_pct(k['auction_coverage_pct'], 0)} of our notional priced"
                  if _ok(k.get("auction_coverage_pct"))
@@ -427,7 +443,7 @@ def _flows(data: PeriodData) -> str:
         ("Day", ""), ("Flow", ""), ("Type", ""),
         ("Orders", "num"), ("Child orders", "num"),
         ("Notional traded in close", "num"), ("Fill rate", "num"),
-        ("Symbols", "num"), ("Market close volume", "num"),
+        ("Symbols", "num"),
         ("Market notional", "num"), ("% of market notional", "num"),
     ]
     body = [
@@ -435,8 +451,8 @@ def _flows(data: PeriodData) -> str:
             _esc(_day(r["date"])), _esc(str(r["flow"])), _esc(str(r["otype_kind"]).title()),
             _qty(r["n_orders"]), _qty(r["n_children"]),
             _usd(r["exec_notional_usd"]), _pct(r["fill_rate_pct"]),
-            _qty(r["n_syms"]), _qty(r["mkt_close_qty"]),
-            _usd(r["mkt_close_notional_usd"]), _pct(r["our_pct_of_market_notional"], 3),
+            _qty(r["n_syms"]),
+            _usd(r["mkt_close_notional_usd"]), _pct(r["our_pct_of_market_notional"]),
         ]
         for _, r in f.iterrows()
     ]
@@ -445,21 +461,21 @@ def _flows(data: PeriodData) -> str:
     if t is not None:
         total = ["Period", "All", "All", _qty(t["n_orders"]), _qty(t["n_children"]),
                  _usd(t["exec_notional_usd"]), _pct(t["fill_rate_pct"]),
-                 _qty(t["n_syms"]), _qty(t["mkt_close_qty"]),
+                 _qty(t["n_syms"]),
                  _usd(t["mkt_close_notional_usd"]),
-                 _pct(t["our_pct_of_market_notional"], 3)]
+                 _pct(t["our_pct_of_market_notional"])]
 
     return (
-        '<p class="take">One row per day, flow and order type. The market columns '
-        'are the whole auction <em>in the symbols that row traded</em>: close '
-        f'volume is everything printed from {_esc(_ist(V.CLOSE_VOLUME_FROM))} '
-        'onwards, valued at the closing price &mdash; the first print between '
+        '<p class="take">One row per day, flow and order type. Market notional is '
+        'the whole auction <em>in the symbols that row traded</em>: everything '
+        f'printed from {_esc(_ist(V.CLOSE_VOLUME_FROM))} onwards, valued at the '
+        'closing price &mdash; the first print between '
         f'{_esc(_ist(V.CLOSE_PRICE_WINDOW[0]))} and '
         f'{_esc(_ist(V.CLOSE_PRICE_WINDOW[1]))}, which is where the auction '
-        'freezes.</p>'
+        'freezes. The volume behind it is in <code>csv/flows.csv</code>.</p>'
         + _table(head, body, total)
-        + '<p class="sub">Because each row&rsquo;s market columns cover only its '
-        'own symbols, rows that share a name overlap: the market notional column '
+        + '<p class="sub">Because each row&rsquo;s market notional covers only its '
+        'own symbols, rows that share a name overlap: that column '
         'does not add up down the page. The Period row is recomputed over the '
         'distinct symbols of the whole period rather than summed.</p>'
     )
@@ -492,7 +508,7 @@ def _clients(data: PeriodData) -> str:
             [_esc(str(r[V.CLIENT_COLUMN]) or "(none)"), _qty(r.get("n_days")),
              _qty(r["n_orders"]), _qty(r["n_children"]), _qty(r["n_syms"]),
              _usd(r["exec_notional_usd"]), _pct(r["fill_rate_pct"]),
-             _pct(r["our_pct_of_market_notional"], 3)]
+             _pct(r["our_pct_of_market_notional"])]
             for _, r in top.iterrows()
         ]
         parts.append(_table(head, body))
